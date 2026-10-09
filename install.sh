@@ -1,61 +1,115 @@
 #!/bin/sh
-# Build substatus from source and install it into $BIN_DIR (default ~/.local/bin).
+# Install or update substatus from its GitHub releases.
 #
-#   ./install.sh                                   # from a checkout
 #   curl -fsSL https://raw.githubusercontent.com/rothzeta/substatus/main/install.sh | sh
 #
-# Builds with a local Go 1.24+ toolchain, or with Docker when Go is missing.
-# Afterwards it offers to save an OpenCode API key (skip with SUBSTATUS_NO_PROMPT=1).
+# Re-run it to update: it does nothing when the installed version is current.
+#
+# Environment:
+#   BIN_DIR              install directory (default ~/.local/bin)
+#   SUBSTATUS_VERSION    release tag to install, e.g. v0.1.0 (default: latest)
+#   SUBSTATUS_NO_PROMPT  set to skip the OpenCode API key prompt
+#
+# The whole script is a function called on the last line, so a truncated
+# download runs nothing.
 set -eu
-
-REPO_URL=https://github.com/rothzeta/substatus.git
-GO_IMAGE=golang:1.24-bookworm
-BIN_DIR=${BIN_DIR:-$HOME/.local/bin}
 
 die() {
 	echo "install.sh: $*" >&2
 	exit 1
 }
 
-# Use the checkout this script lives in, or clone one (e.g. when piped from curl).
-src=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || src=
-if [ -z "$src" ] || ! grep -qs '^module github.com/rothzeta/substatus$' "$src/go.mod"; then
-	command -v git >/dev/null 2>&1 || die "git is required to fetch the source"
-	tmp=$(mktemp -d)
-	trap 'rm -rf "$tmp"' EXIT
-	git clone --quiet --depth 1 "$REPO_URL" "$tmp/substatus"
-	src=$tmp/substatus
-fi
+need() {
+	command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
 
-echo "Building substatus from $src"
-if command -v go >/dev/null 2>&1; then
-	(cd "$src" && CGO_ENABLED=0 go build -trimpath -o substatus ./cmd/substatus)
-elif command -v docker >/dev/null 2>&1; then
-	echo "Go not found; building in Docker ($GO_IMAGE)"
-	docker run --rm -v "$src:/src" -w /src -u "$(id -u):$(id -g)" \
-		-e HOME=/tmp -e GOCACHE=/tmp/gocache -e CGO_ENABLED=0 \
-		"$GO_IMAGE" go build -trimpath -o substatus ./cmd/substatus
-else
-	die "Go 1.24+ or Docker is required to build substatus"
-fi
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | cut -d' ' -f1
+	else
+		die "sha256sum or shasum is required"
+	fi
+}
 
-mkdir -p "$BIN_DIR"
-install -m 0755 "$src/substatus" "$BIN_DIR/substatus"
-echo "Installed $("$BIN_DIR/substatus" --version) to $BIN_DIR/substatus"
-case ":$PATH:" in
-*":$BIN_DIR:"*) ;;
-*) echo "Note: $BIN_DIR is not on your PATH; add it to your shell profile." ;;
-esac
+main() {
+	repo=rothzeta/substatus
+	bin_dir=${BIN_DIR:-$HOME/.local/bin}
+	bin=$bin_dir/substatus
+	need curl
+	need tar
 
-# Offer to save an OpenCode API key unless one is already configured.
-key_file=${XDG_CONFIG_HOME:-$HOME/.config}/substatus/opencode_api_key
-[ "$(uname -s)" = Darwin ] && key_file="$HOME/Library/Application Support/substatus/opencode_api_key"
-if [ -z "${SUBSTATUS_NO_PROMPT:-}" ] && [ -z "${OPENCODE_API_KEY:-}" ] && [ ! -s "$key_file" ] &&
-	(: </dev/tty) 2>/dev/null; then
-	printf 'Save an OpenCode API key for OpenCode Go usage? [y/N] ' >/dev/tty
-	read -r answer </dev/tty || answer=
-	case $answer in
-	[yY]*) "$BIN_DIR/substatus" --set-opencode-key </dev/tty ;;
-	*) echo "Skipped. Run 'substatus --set-opencode-key' any time." ;;
+	case $(uname -s) in
+	Linux) os=linux ;;
+	Darwin) os=darwin ;;
+	*) die "unsupported OS: $(uname -s) (build from source instead)" ;;
 	esac
-fi
+	case $(uname -m) in
+	x86_64 | amd64) arch=amd64 ;;
+	aarch64 | arm64) arch=arm64 ;;
+	*) die "unsupported architecture: $(uname -m) (build from source instead)" ;;
+	esac
+
+	version=${SUBSTATUS_VERSION:-}
+	if [ -z "$version" ]; then
+		# /releases/latest redirects to /releases/tag/<version>.
+		url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest") ||
+			die "could not reach GitHub"
+		version=${url##*/}
+		case $version in
+		v*) ;;
+		*) die "no release found for $repo" ;;
+		esac
+	fi
+
+	installed=
+	if [ -x "$bin" ]; then
+		installed=$("$bin" --version 2>/dev/null) || installed=
+		installed=${installed#substatus }
+	fi
+
+	if [ "$installed" = "$version" ]; then
+		echo "substatus $version is already installed at $bin"
+	else
+		asset=substatus_${os}_${arch}.tar.gz
+		base=https://github.com/$repo/releases/download/$version
+		tmp=$(mktemp -d)
+		trap 'rm -rf "$tmp"' EXIT
+		echo "Downloading substatus $version ($os/$arch)"
+		curl -fsSL -o "$tmp/$asset" "$base/$asset" || die "could not download $base/$asset"
+		curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt" || die "could not download checksums"
+		expected=$(grep " $asset\$" "$tmp/checksums.txt" | cut -d' ' -f1)
+		if [ -z "$expected" ] || [ "$expected" != "$(sha256 "$tmp/$asset")" ]; then
+			die "checksum mismatch for $asset"
+		fi
+		tar -xzf "$tmp/$asset" -C "$tmp" substatus
+		mkdir -p "$bin_dir"
+		# Replace atomically so a running substatus keeps working.
+		install -m 0755 "$tmp/substatus" "$bin.new"
+		mv -f "$bin.new" "$bin"
+		if [ -n "$installed" ]; then
+			echo "Updated substatus $installed -> $version at $bin"
+		else
+			echo "Installed substatus $version at $bin"
+		fi
+	fi
+
+	case ":$PATH:" in
+	*":$bin_dir:"*) ;;
+	*) echo "Note: $bin_dir is not on your PATH; add it to your shell profile." ;;
+	esac
+
+	# On first install, offer to save an OpenCode API key.
+	if [ -z "$installed" ] && [ -z "${SUBSTATUS_NO_PROMPT:-}" ] && [ -z "${OPENCODE_API_KEY:-}" ] &&
+		(: </dev/tty) 2>/dev/null; then
+		printf 'Save an OpenCode API key for OpenCode Go usage? [y/N] ' >/dev/tty
+		read -r answer </dev/tty || answer=
+		case $answer in
+		[yY]*) "$bin" --set-opencode-key </dev/tty || echo "Key not saved. Run 'substatus --set-opencode-key' any time." ;;
+		*) echo "Skipped. Run 'substatus --set-opencode-key' any time." ;;
+		esac
+	fi
+}
+
+main "$@"
