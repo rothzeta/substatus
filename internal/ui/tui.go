@@ -13,8 +13,15 @@ import (
 	"github.com/rothzeta/substatus/internal/term"
 )
 
-// clearScreen clears the terminal and homes the cursor.
-const clearScreen = esc + "2J" + esc + "H"
+// Screen control. The TUI draws on the alternate screen, so quitting restores
+// whatever the terminal showed before.
+const (
+	enterAltScreen = esc + "?1049h" + esc + "?25l" // also hides the cursor
+	leaveAltScreen = esc + "?25h" + esc + "?1049l"
+	cursorHome     = esc + "H"
+	eraseLine      = esc + "K" // to the end of the line
+	eraseBelow     = esc + "J" // to the end of the screen
+)
 
 // Options configures the interactive TUI.
 type Options struct {
@@ -44,33 +51,34 @@ func (t *TUI) Refresh() <-chan struct{} { return t.refresh }
 // Quit returns a channel closed when the user presses q or input reaches EOF.
 func (t *TUI) Quit() <-chan struct{} { return t.quit }
 
-// Start enables raw terminal input where supported and starts the key reader.
-// The returned function restores the terminal's previous settings.
+// Start switches to the alternate screen, enables raw terminal input where
+// supported, and starts the key reader. The returned function restores the
+// terminal's previous input settings and screen.
 func (t *TUI) Start() (restore func()) {
-	restore, err := term.MakeRaw(t.opts.In)
+	restoreInput, err := term.MakeRaw(t.opts.In)
 	if err != nil {
-		restore = func() {} // line-buffered input still works
+		restoreInput = func() {} // line-buffered input still works
 	}
+	fmt.Fprint(t.opts.Out, enterAltScreen)
 	go t.keys()
-	return restore
+	return func() {
+		restoreInput()
+		fmt.Fprint(t.opts.Out, leaveAltScreen)
+	}
 }
 
-// Draw clears and repaints the screen with snap.
+// Draw repaints the screen with snap. It overwrites the previous frame in
+// place, erasing what each line and the rest of the screen held before,
+// because clearing the whole screen first flickers.
 func (t *TUI) Draw(snap status.Snapshot) {
 	pal := t.opts.Palette
 	var b strings.Builder
-	b.WriteString(clearScreen)
 	b.WriteString(header(snap, pal) + "\n")
 	b.WriteString(pal.Dim(fmt.Sprintf("refresh every %s · r refresh · q quit", t.opts.Interval)) + "\n\n")
 	for _, p := range snap.Providers {
 		b.WriteString(card(p, pal) + "\n\n")
 	}
-	fmt.Fprint(t.opts.Out, b.String())
-}
-
-// Clear wipes the screen on exit.
-func (t *TUI) Clear() {
-	fmt.Fprint(t.opts.Out, clearScreen)
+	fmt.Fprint(t.opts.Out, cursorHome+strings.ReplaceAll(b.String(), "\n", eraseLine+"\n")+eraseBelow)
 }
 
 // keys reads single keystrokes until quit or end of input.

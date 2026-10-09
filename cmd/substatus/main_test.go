@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/rothzeta/substatus/internal/provider"
 )
 
 func TestHelpExitsZeroAndListsProviders(t *testing.T) {
@@ -102,9 +100,12 @@ func TestSetOpenCodeKeyFromPipeIsSavedPrivately(t *testing.T) {
 	if strings.Contains(out.String()+errBuf.String(), "test-key-123") {
 		t.Fatal("key echoed to output")
 	}
-	path, err := provider.OpenCodeKeyPath()
-	if err != nil {
-		t.Fatal(err)
+	path, ok := strings.CutPrefix(strings.TrimSpace(out.String()), "saved OpenCode API key to ")
+	if !ok {
+		t.Fatalf("stdout = %q; want the saved key path", out.String())
+	}
+	if dir, _ := os.UserConfigDir(); path != filepath.Join(dir, "substatus", "opencode_api_key") {
+		t.Fatalf("saved key path = %q; want it under the user config directory %q", path, dir)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil || string(data) != "test-key-123\n" {

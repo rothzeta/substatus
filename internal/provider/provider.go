@@ -32,9 +32,9 @@ var (
 	errOutputLimit  = errors.New("command output exceeds limit")
 )
 
-// validPercent reports whether p is a finite percentage in [0, max].
-func validPercent(p, max float64) bool {
-	return !math.IsNaN(p) && !math.IsInf(p, 0) && p >= 0 && p <= max
+// validPercent reports whether p is a finite percentage in [0, limit].
+func validPercent(p, limit float64) bool {
+	return !math.IsNaN(p) && !math.IsInf(p, 0) && p >= 0 && p <= limit
 }
 
 // runCLI runs a provider CLI with a bounded deadline and output, a scrubbed

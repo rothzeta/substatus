@@ -119,7 +119,7 @@ func TestOpenCodeUsesSavedKeyWhenEnvUnset(t *testing.T) {
 	t.Setenv("OPENCODE_API_KEY", "")
 	t.Setenv("HOME", t.TempDir()) // macOS config dir
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if err := SaveOpenCodeKey("saved-key"); err != nil {
+	if _, err := SaveOpenCodeKey("saved-key"); err != nil {
 		t.Fatal(err)
 	}
 	auths := make(chan string, 2)
@@ -146,7 +146,7 @@ func TestSaveOpenCodeKeyRejectsMalformedKeys(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for _, key := range []string{"", "   ", "two words"} {
-		if err := SaveOpenCodeKey(key); err == nil {
+		if _, err := SaveOpenCodeKey(key); err == nil {
 			t.Errorf("accepted %q", key)
 		}
 	}
@@ -178,7 +178,7 @@ func TestOpenCodeKeyUsesFirstLineOnly(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("OPENCODE_API_KEY", "")
-	path, err := OpenCodeKeyPath()
+	path, err := opencodeKeyPath()
 	if err != nil {
 		t.Fatal(err)
 	}

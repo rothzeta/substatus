@@ -127,7 +127,7 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 func interactive(ctx context.Context, r runner.Runner, in, out *os.File, interval time.Duration, pal ui.Palette) int {
 	ctx, cancel := context.WithCancel(ctx)
 	tui := ui.NewTUI(ui.Options{Interval: interval, Palette: pal, In: in, Out: out})
-	restoreInput := tui.Start()
+	restore := tui.Start()
 	snaps := r.Watch(ctx, tui.Refresh())
 	resizes := ui.ResizeSignals(ctx)
 
@@ -165,8 +165,7 @@ drain:
 			break drain
 		}
 	}
-	restoreInput()
-	tui.Clear()
+	restore()
 	return 0
 }
 
@@ -180,14 +179,14 @@ func saveOpenCodeKey(ctx context.Context, stdin *os.File, stdout, stderr io.Writ
 	if tty {
 		fmt.Fprintln(stderr)
 	}
+	var path string
 	if err == nil {
-		err = provider.SaveOpenCodeKey(key)
+		path, err = provider.SaveOpenCodeKey(key)
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, "substatus: could not save OpenCode API key:", err)
 		return 1
 	}
-	path, _ := provider.OpenCodeKeyPath()
 	fmt.Fprintln(stdout, "saved OpenCode API key to", path)
 	return 0
 }
