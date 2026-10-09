@@ -24,7 +24,7 @@ import (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 // configuredProviders lists the providers in display order.
@@ -39,7 +39,7 @@ func configuredProviders() []runner.Provider {
 
 // run is the whole program except process exit, so tests can exercise the CLI
 // without spawning a process.
-func run(args []string, stdout, stderr io.Writer) int {
+func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("substatus", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
@@ -48,6 +48,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		once    = fs.Bool("once", false, "print one snapshot and exit (for scripting)")
 		noColor = fs.Bool("no-color", false, "disable ANSI color (also honors NO_COLOR)")
 		showVer = fs.Bool("version", false, "print version and exit")
+		setKey  = fs.Bool("set-opencode-key", false, "read an OpenCode API key from stdin (hidden prompt on a terminal) and save it")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "substatus — subscription & quota status for local AI CLIs\n\n")
@@ -56,7 +57,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fs.PrintDefaults()
 		fmt.Fprintf(fs.Output(), "\nProviders: Codex, Claude, Gemini (agy), OpenCode.\n")
 		fmt.Fprintf(fs.Output(), "Claude and Gemini use their CLIs' /usage; Codex uses app-server status.\n")
-		fmt.Fprintf(fs.Output(), "No provider credential files are read. OpenCode uses OPENCODE_API_KEY.\n")
+		fmt.Fprintf(fs.Output(), "No provider credential files are read. OpenCode uses OPENCODE_API_KEY or --set-opencode-key.\n")
 	}
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -67,6 +68,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *showVer {
 		fmt.Fprintln(stdout, "substatus", provider.Version)
 		return 0
+	}
+	if *setKey {
+		return saveOpenCodeKey(stdin, stdout, stderr)
 	}
 	if *refresh <= 0 {
 		fmt.Fprintln(stderr, "substatus: --refresh must be positive")
@@ -111,4 +115,26 @@ func run(args []string, stdout, stderr io.Writer) int {
 			tui.Draw(last)
 		}
 	}
+}
+
+// saveOpenCodeKey prompts for (or reads piped) OpenCode API key and stores it.
+func saveOpenCodeKey(stdin *os.File, stdout, stderr io.Writer) int {
+	interactive := ui.IsTerminal(stdin)
+	if interactive {
+		fmt.Fprint(stderr, "OpenCode API key (input hidden): ")
+	}
+	key, err := ui.ReadSecret(stdin)
+	if interactive {
+		fmt.Fprintln(stderr)
+	}
+	if err == nil {
+		err = provider.SaveOpenCodeKey(key)
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "substatus: could not save OpenCode API key:", err)
+		return 1
+	}
+	path, _ := provider.OpenCodeKeyPath()
+	fmt.Fprintln(stdout, "saved OpenCode API key to", path)
+	return 0
 }
