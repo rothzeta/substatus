@@ -47,6 +47,20 @@ const minRefresh = 15 * time.Second
 // killed and reaped.
 const shutdownGrace = 3 * time.Second
 
+const usageHeader = `substatus — subscription & quota status for local AI CLIs
+
+Usage:
+  substatus [flags]
+
+Flags:
+`
+
+const usageFooter = `
+Providers: Codex, Claude, Gemini (agy), OpenCode.
+Claude and Gemini use their CLIs' /usage; Codex uses app-server status.
+No provider credential files are read. OpenCode uses OPENCODE_API_KEY or --set-opencode-key.
+`
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
@@ -75,13 +89,9 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		setKey  = fs.Bool("set-opencode-key", false, "read an OpenCode API key from stdin and save it")
 	)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "substatus — subscription & quota status for local AI CLIs\n\n")
-		fmt.Fprintf(fs.Output(), "Usage:\n  substatus [flags]\n\n")
-		fmt.Fprintf(fs.Output(), "Flags:\n")
+		fmt.Fprint(fs.Output(), usageHeader)
 		fs.PrintDefaults()
-		fmt.Fprintf(fs.Output(), "\nProviders: Codex, Claude, Gemini (agy), OpenCode.\n")
-		fmt.Fprintf(fs.Output(), "Claude and Gemini use their CLIs' /usage; Codex uses app-server status.\n")
-		fmt.Fprintf(fs.Output(), "No provider credential files are read. OpenCode uses OPENCODE_API_KEY or --set-opencode-key.\n")
+		fmt.Fprint(fs.Output(), usageFooter)
 	}
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

@@ -32,7 +32,8 @@ type Options struct {
 }
 
 // TUI is a small interactive loop: the caller redraws on every snapshot and
-// terminal resize; keypresses request a refresh (r) or quit (q / Ctrl-C).
+// terminal resize; keypresses request a refresh (r) or quit (q). Raw mode
+// keeps signal keys, so Ctrl-C reaches the caller as SIGINT.
 type TUI struct {
 	opts     Options
 	refresh  chan struct{}
@@ -91,7 +92,7 @@ func (t *TUI) keys() {
 			return
 		}
 		switch ch {
-		case 'q', 'Q', 3: // 3 = Ctrl-C
+		case 'q', 'Q':
 			t.quitOnce.Do(func() { close(t.quit) })
 			return
 		case 'r', 'R':
