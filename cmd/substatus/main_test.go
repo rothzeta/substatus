@@ -2,13 +2,15 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestHelpExitsZeroAndListsProviders(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	if code := run([]string{"--help"}, &out, &errBuf); code != 0 {
+	if code := run([]string{"--help"}, nil, &out, &errBuf); code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
 	text := out.String() + errBuf.String()
@@ -21,7 +23,7 @@ func TestHelpExitsZeroAndListsProviders(t *testing.T) {
 
 func TestVersionFlag(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	if code := run([]string{"--version"}, &out, &errBuf); code != 0 {
+	if code := run([]string{"--version"}, nil, &out, &errBuf); code != 0 {
 		t.Fatalf("exit = %d", code)
 	}
 	if !strings.Contains(out.String(), "substatus") {
@@ -31,7 +33,7 @@ func TestVersionFlag(t *testing.T) {
 
 func TestNonPositiveRefreshRejected(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	if code := run([]string{"--refresh", "0s", "--once"}, &out, &errBuf); code != 2 {
+	if code := run([]string{"--refresh", "0s", "--once"}, nil, &out, &errBuf); code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
 	}
 	if !strings.Contains(errBuf.String(), "positive") {
@@ -41,7 +43,7 @@ func TestNonPositiveRefreshRejected(t *testing.T) {
 
 func TestUnknownFlagExitsTwo(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	if code := run([]string{"--nope"}, &out, &errBuf); code != 2 {
+	if code := run([]string{"--nope"}, nil, &out, &errBuf); code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
 	}
 }
@@ -52,11 +54,12 @@ func TestUnknownFlagExitsTwo(t *testing.T) {
 func TestOnceOutputInSanitizedEnvironment(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("OPENCODE_API_KEY", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("NO_COLOR", "1")
 	t.Setenv("PATH", "/nonexistent")
 
 	var out, errBuf bytes.Buffer
-	if code := run([]string{"--once"}, &out, &errBuf); code != 0 {
+	if code := run([]string{"--once"}, nil, &out, &errBuf); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, errBuf.String())
 	}
 	text := out.String()
@@ -75,5 +78,47 @@ func TestOnceOutputInSanitizedEnvironment(t *testing.T) {
 	}
 	if strings.Contains(text, "Bearer ") || strings.Contains(text, "sk-") {
 		t.Errorf("output appears to contain credential material:\n%s", text)
+	}
+}
+
+func TestSetOpenCodeKeyFromPipeIsSavedPrivately(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	in := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(in, []byte("  test-key-123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"--set-opencode-key"}, f, &out, &errBuf); code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, errBuf.String())
+	}
+	if strings.Contains(out.String()+errBuf.String(), "test-key-123") {
+		t.Fatal("key echoed to output")
+	}
+	path := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "substatus", "opencode_api_key")
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "test-key-123\n" {
+		t.Fatalf("saved key = %q, %v", data, err)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("key file mode = %v", fi.Mode().Perm())
+	}
+}
+
+func TestSetOpenCodeKeyRejectsEmptyInput(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"--set-opencode-key"}, f, &out, &errBuf); code != 1 {
+		t.Fatalf("exit = %d", code)
 	}
 }

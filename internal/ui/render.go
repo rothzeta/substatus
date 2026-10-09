@@ -51,11 +51,7 @@ func (p Palette) Blue(s string) string   { return p.wrap(fgBlue, s) }
 
 // ColorEnabled reports whether ANSI color should be used on out.
 func ColorEnabled(noColorFlag bool, out *os.File) bool {
-	if noColorFlag || os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	fi, err := out.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	return !noColorFlag && os.Getenv("NO_COLOR") == "" && IsTerminal(out)
 }
 
 // RenderOnce writes a plain-text snapshot for scripting (no cursor control).

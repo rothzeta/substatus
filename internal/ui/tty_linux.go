@@ -6,34 +6,42 @@ import (
 	"unsafe"
 )
 
-// enableRawInput puts a terminal into single-character mode and returns a
-// restoration function. Non-terminal inputs remain line/buffer based.
+// enableRawInput puts a terminal into single-character mode without echo.
 func enableRawInput(f *os.File) (func(), error) {
+	return setTermios(f, func(t *syscall.Termios) {
+		t.Lflag &^= syscall.ECHO | syscall.ICANON
+		t.Cc[syscall.VMIN] = 1
+		t.Cc[syscall.VTIME] = 0
+	})
+}
+
+// disableEcho keeps line editing but hides typed characters.
+func disableEcho(f *os.File) (func(), error) {
+	return setTermios(f, func(t *syscall.Termios) { t.Lflag &^= syscall.ECHO })
+}
+
+// setTermios applies change to a terminal's settings and returns a function
+// restoring the originals. Non-terminal files are left alone.
+func setTermios(f *os.File, change func(*syscall.Termios)) (func(), error) {
 	noop := func() {}
-	if f == nil {
-		return noop, nil
-	}
-	info, err := f.Stat()
-	if err != nil {
-		return noop, err
-	}
-	if info.Mode()&os.ModeCharDevice == 0 {
+	if !IsTerminal(f) {
 		return noop, nil
 	}
 	var original syscall.Termios
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TCGETS), uintptr(unsafe.Pointer(&original)))
-	if errno != 0 {
-		return noop, errno
+	if err := ioctlTermios(f, syscall.TCGETS, &original); err != nil {
+		return noop, err
 	}
-	raw := original
-	raw.Lflag &^= syscall.ECHO | syscall.ICANON
-	raw.Cc[syscall.VMIN] = 1
-	raw.Cc[syscall.VTIME] = 0
-	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(&raw)))
-	if errno != 0 {
-		return noop, errno
+	modified := original
+	change(&modified)
+	if err := ioctlTermios(f, syscall.TCSETS, &modified); err != nil {
+		return noop, err
 	}
-	return func() {
-		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(&original)))
-	}, nil
+	return func() { _ = ioctlTermios(f, syscall.TCSETS, &original) }, nil
+}
+
+func ioctlTermios(f *os.File, req uintptr, t *syscall.Termios) error {
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), req, uintptr(unsafe.Pointer(t))); errno != 0 {
+		return errno
+	}
+	return nil
 }

@@ -50,6 +50,7 @@ func TestOpenCodeFetchesGoUsageFromFirstPartyAPI(t *testing.T) {
 
 func TestOpenCodeWithoutAPIKeyDoesNotMakeRequest(t *testing.T) {
 	t.Setenv("OPENCODE_API_KEY", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	called := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
 	defer server.Close()
@@ -108,5 +109,40 @@ func TestOpenCodeMalformedUsageIsError(t *testing.T) {
 	got := (OpenCode{baseURL: server.URL}).Fetch(context.Background())
 	if got.State != status.StateError || got.Note == "" {
 		t.Fatalf("result = %+v, want decode error", got)
+	}
+}
+
+func TestOpenCodeUsesSavedKeyWhenEnvUnset(t *testing.T) {
+	t.Setenv("OPENCODE_API_KEY", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := SaveOpenCodeKey("saved-key"); err != nil {
+		t.Fatal(err)
+	}
+	auths := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auths <- r.Header.Get("Authorization")
+		fmt.Fprint(w, `{"usage":{"weekly":{"percent":10}}}`)
+	}))
+	defer server.Close()
+
+	if got := (OpenCode{baseURL: server.URL}).Fetch(context.Background()); got.State != status.StateOK {
+		t.Fatalf("got %+v", got)
+	}
+	if auth := <-auths; auth != "Bearer saved-key" {
+		t.Fatalf("authorization = %q", auth)
+	}
+	t.Setenv("OPENCODE_API_KEY", "env-key")
+	(OpenCode{baseURL: server.URL}).Fetch(context.Background())
+	if auth := <-auths; auth != "Bearer env-key" {
+		t.Fatalf("env key should win, authorization = %q", auth)
+	}
+}
+
+func TestSaveOpenCodeKeyRejectsMalformedKeys(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, key := range []string{"", "   ", "two words"} {
+		if err := SaveOpenCodeKey(key); err == nil {
+			t.Errorf("accepted %q", key)
+		}
 	}
 }

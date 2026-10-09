@@ -3,10 +3,12 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,7 +22,7 @@ const (
 )
 
 // OpenCode reads Go subscription usage directly from OpenCode's first-party
-// Zen API with OPENCODE_API_KEY. The endpoint is present in OpenCode's server
+// Zen API with OPENCODE_API_KEY, or else the key saved by SaveOpenCodeKey. The endpoint is present in OpenCode's server
 // source, but is not covered by a stable public API contract.
 type OpenCode struct {
 	baseURL string // tests only; empty means opencodeOrigin
@@ -39,9 +41,10 @@ func (o OpenCode) Fetch(ctx context.Context) status.Provider {
 		Source:  "OpenCode Go usage API (" + opencodeUsagePath + ")",
 		Quality: status.QualityPrivate,
 	}
-	key := strings.TrimSpace(os.Getenv("OPENCODE_API_KEY"))
+	key := opencodeKey()
 	if key == "" {
-		res.State, res.Note = status.StateAuthMissing, "set OPENCODE_API_KEY to query OpenCode Go subscription usage"
+		res.State = status.StateAuthMissing
+		res.Note = "run `substatus --set-opencode-key` or set OPENCODE_API_KEY to query OpenCode Go usage"
 		return res
 	}
 	body, code, err := o.get(ctx, key)
@@ -52,7 +55,7 @@ func (o OpenCode) Fetch(ctx context.Context) status.Provider {
 	switch code {
 	case http.StatusOK:
 	case http.StatusUnauthorized:
-		res.State, res.Note = status.StateAuthMissing, "OpenCode rejected OPENCODE_API_KEY (HTTP 401)"
+		res.State, res.Note = status.StateAuthMissing, "OpenCode rejected the API key (HTTP 401)"
 		return res
 	case http.StatusForbidden:
 		res.State = status.StateUnsupported
@@ -134,4 +137,66 @@ func (o OpenCode) get(ctx context.Context, key string) ([]byte, int, error) {
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	return body, resp.StatusCode, err
+}
+
+// OpenCodeKeyPath is where SaveOpenCodeKey stores the key: substatus/opencode_api_key
+// under the user config directory ($XDG_CONFIG_HOME or ~/.config on Linux).
+func OpenCodeKeyPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("locate config directory: %w", err)
+	}
+	return filepath.Join(dir, "substatus", "opencode_api_key"), nil
+}
+
+// SaveOpenCodeKey atomically writes key to OpenCodeKeyPath with mode 0600.
+func SaveOpenCodeKey(key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" || strings.ContainsAny(key, " \t\r\n") {
+		return errors.New("API key must be a single non-empty token")
+	}
+	path, err := OpenCodeKeyPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".opencode_api_key-*") // mode 0600
+	if err != nil {
+		return fmt.Errorf("create key file: %w", err)
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString(key + "\n"); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write key file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("write key file: %w", err)
+	}
+	if err := os.Rename(f.Name(), path); err != nil {
+		return fmt.Errorf("replace key file: %w", err)
+	}
+	return nil
+}
+
+// opencodeKey returns OPENCODE_API_KEY, or else the saved key, or "".
+func opencodeKey() string {
+	if key := strings.TrimSpace(os.Getenv("OPENCODE_API_KEY")); key != "" {
+		return key
+	}
+	path, err := OpenCodeKeyPath()
+	if err != nil {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 4096))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
