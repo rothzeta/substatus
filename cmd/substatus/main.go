@@ -16,12 +16,25 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/rothzeta/substatus/internal/provider"
 	"github.com/rothzeta/substatus/internal/runner"
 	"github.com/rothzeta/substatus/internal/status"
+	"github.com/rothzeta/substatus/internal/term"
 	"github.com/rothzeta/substatus/internal/ui"
 )
+
+// version is set at release build time with -ldflags "-X main.version=v1.2.3".
+var version = "dev"
+
+// minRefresh keeps automatic refreshes from respawning every CLI back to back;
+// one cycle costs several CPU-seconds.
+const minRefresh = 15 * time.Second
+
+// shutdownGrace bounds how long quitting waits for provider subprocesses to be
+// killed and reaped.
+const shutdownGrace = 3 * time.Second
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -31,7 +44,7 @@ func main() {
 func configuredProviders() []runner.Provider {
 	return []runner.Provider{
 		provider.Claude{},
-		provider.Codex{},
+		provider.Codex{ClientVersion: version},
 		provider.Gemini{},
 		provider.OpenCode{},
 	}
@@ -44,11 +57,11 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 
 	var (
-		refresh = fs.Duration("refresh", runner.DefaultInterval, "interval between automatic refreshes (e.g. 30s, 2m)")
+		refresh = fs.Duration("refresh", runner.DefaultInterval, "interval between automatic refreshes (minimum 15s)")
 		once    = fs.Bool("once", false, "print one snapshot and exit (for scripting)")
 		noColor = fs.Bool("no-color", false, "disable ANSI color (also honors NO_COLOR)")
 		showVer = fs.Bool("version", false, "print version and exit")
-		setKey  = fs.Bool("set-opencode-key", false, "read an OpenCode API key from stdin (hidden prompt on a terminal) and save it")
+		setKey  = fs.Bool("set-opencode-key", false, "read an OpenCode API key from stdin and save it")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "substatus — subscription & quota status for local AI CLIs\n\n")
@@ -66,14 +79,19 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if *showVer {
-		fmt.Fprintln(stdout, "substatus", provider.Version)
+		fmt.Fprintln(stdout, "substatus", version)
 		return 0
 	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(),
+		os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	defer cancel()
+
 	if *setKey {
-		return saveOpenCodeKey(stdin, stdout, stderr)
+		return saveOpenCodeKey(ctx, stdin, stdout, stderr)
 	}
-	if *refresh <= 0 {
-		fmt.Fprintln(stderr, "substatus: --refresh must be positive")
+	if *refresh < minRefresh {
+		fmt.Fprintf(stderr, "substatus: --refresh must be at least %s\n", minRefresh)
 		return 2
 	}
 
@@ -82,32 +100,37 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	r := runner.New(*refresh, configuredProviders()...)
 
 	if *once {
-		ui.RenderOnce(stdout, r.Refresh(context.Background()), pal)
+		ui.RenderOnce(stdout, r.Refresh(ctx), pal)
 		return 0
 	}
+	if !term.IsTerminal(stdin) || !term.IsTerminal(out) {
+		fmt.Fprintln(stderr, "substatus: the interactive view needs a terminal; use --once for scripts")
+		return 2
+	}
+	return interactive(ctx, r, stdin, out, *refresh, pal)
+}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	tui := ui.NewTUI(ui.Options{Interval: *refresh, Palette: pal, Out: stdout})
-	defer tui.Clear()
+// interactive runs the TUI until quit, a signal, or end of input. Fetching
+// happens in the runner, so this loop only draws and stays responsive to quit
+// keys and resizes while providers are slow.
+func interactive(ctx context.Context, r runner.Runner, in, out *os.File, interval time.Duration, pal ui.Palette) int {
+	ctx, cancel := context.WithCancel(ctx)
+	tui := ui.NewTUI(ui.Options{Interval: interval, Palette: pal, In: in, Out: out})
 	restoreInput := tui.Start()
-	defer restoreInput()
-
-	// Fetching happens in the runner, so this loop only draws and stays
-	// responsive to quit keys and resizes while providers are slow.
 	snaps := r.Watch(ctx, tui.Refresh())
 	resizes := ui.ResizeSignals(ctx)
+
 	var last status.Snapshot
+loop:
 	for {
 		select {
 		case <-ctx.Done():
-			return 0
+			break loop
 		case <-tui.Quit():
-			return 0
+			break loop
 		case snap, ok := <-snaps:
 			if !ok {
-				return 0
+				break loop
 			}
 			last = snap
 			tui.Draw(last)
@@ -115,15 +138,34 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 			tui.Draw(last)
 		}
 	}
+
+	// Cancel in-flight checks and wait (bounded) for their subprocesses to be
+	// killed, so none outlive the program.
+	cancel()
+	grace := time.After(shutdownGrace)
+drain:
+	for {
+		select {
+		case _, ok := <-snaps:
+			if !ok {
+				break drain
+			}
+		case <-grace:
+			break drain
+		}
+	}
+	restoreInput()
+	tui.Clear()
+	return 0
 }
 
 // saveOpenCodeKey prompts for (or reads piped) OpenCode API key and stores it.
-func saveOpenCodeKey(stdin *os.File, stdout, stderr io.Writer) int {
-	interactive := ui.IsTerminal(stdin)
+func saveOpenCodeKey(ctx context.Context, stdin *os.File, stdout, stderr io.Writer) int {
+	interactive := term.IsTerminal(stdin)
 	if interactive {
-		fmt.Fprint(stderr, "OpenCode API key (input hidden): ")
+		fmt.Fprint(stderr, "OpenCode API key: ")
 	}
-	key, err := ui.ReadSecret(stdin)
+	key, err := term.ReadSecret(ctx, stdin)
 	if interactive {
 		fmt.Fprintln(stderr)
 	}

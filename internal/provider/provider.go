@@ -19,9 +19,6 @@ import (
 	"unicode"
 )
 
-// Version identifies substatus to provider protocols that ask for a client version.
-const Version = "0.1.0"
-
 // maxBody bounds every response body or CLI output we read.
 const maxBody = 1 << 20 // 1 MiB
 
@@ -39,44 +36,60 @@ func validPercent(p, max float64) bool {
 }
 
 // runCLI runs a provider CLI with a bounded deadline and output, a scrubbed
-// environment that keeps only the named credential variables, and a neutral
-// working directory so no project configuration is picked up. Stderr is
-// discarded: it is never rendered.
+// environment that keeps only the named credential variables, and a private
+// empty working directory, so no project configuration (such as hooks
+// planted in a shared directory) is picked up. Stderr is discarded: it is
+// never rendered.
 func runCLI(ctx context.Context, name string, keepEnv []string, args ...string) ([]byte, error) {
 	binary, err := exec.LookPath(name)
 	if err != nil {
 		return nil, errNotInstalled
 	}
+	dir, err := os.MkdirTemp("", "substatus-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
 	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env = envWithoutSecrets(os.Environ(), keepEnv...)
-	cmd.Dir = os.TempDir()
+	cmd.Dir = dir
 	cmd.WaitDelay = time.Second
-	var stdout cappedBuffer
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
+	stdout := &cappedWriter{limit: maxBody}
+	cmd.Stdout = stdout
+	err = cmd.Run()
+	switch {
+	case stdout.exceeded: // checked first: the killed child's exit error hides it
+		return nil, errOutputLimit
+	case ctx.Err() != nil:
+		return nil, ctx.Err()
+	case err != nil:
 		return nil, err
 	}
-	return stdout.Bytes(), nil
+	return stdout.buf.Bytes(), nil
 }
 
-type cappedBuffer struct {
-	bytes.Buffer
+// cappedWriter keeps at most limit bytes. It deliberately does not embed
+// bytes.Buffer: a promoted ReadFrom would let io.Copy bypass Write.
+type cappedWriter struct {
+	buf      bytes.Buffer
+	limit    int
+	exceeded bool
 }
 
-func (b *cappedBuffer) Write(p []byte) (int, error) {
-	if b.Len()+len(p) > maxBody {
+func (w *cappedWriter) Write(p []byte) (int, error) {
+	if w.buf.Len()+len(p) > w.limit {
+		w.exceeded = true
 		return 0, errOutputLimit
 	}
-	return b.Buffer.Write(p)
+	return w.buf.Write(p)
 }
 
-// envWithoutSecrets drops credential-looking variables, except those named in
-// keep, so one provider's secrets never reach another provider's CLI.
+// envWithoutSecrets drops credential-looking variables (API keys, tokens,
+// secrets, passwords, cloud credentials), except those named in keep, so one
+// provider's secrets never reach another provider's CLI. It is a best-effort
+// denylist, not a guarantee.
 func envWithoutSecrets(env []string, keep ...string) []string {
 	filtered := make([]string, 0, len(env))
 	for _, entry := range env {
@@ -85,9 +98,9 @@ func envWithoutSecrets(env []string, keep ...string) []string {
 			continue
 		}
 		upper := strings.ToUpper(key)
-		secret := strings.HasSuffix(upper, "_API_KEY") || strings.Contains(upper, "OAUTH_TOKEN") ||
-			strings.HasSuffix(upper, "_ACCESS_TOKEN") || strings.HasSuffix(upper, "_CLIENT_SECRET") ||
-			strings.HasSuffix(upper, "_PASSWORD")
+		secret := strings.HasSuffix(upper, "_KEY") || strings.Contains(upper, "TOKEN") ||
+			strings.Contains(upper, "SECRET") || strings.Contains(upper, "PASSWORD") ||
+			strings.HasPrefix(upper, "AWS_")
 		if secret && !slices.Contains(keep, key) {
 			continue
 		}

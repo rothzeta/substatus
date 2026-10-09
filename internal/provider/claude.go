@@ -25,7 +25,7 @@ func (Claude) Fetch(ctx context.Context) status.Provider {
 		Quality: status.QualityCLI,
 	}
 	// Claude Code's own credential variables stay; other secrets are scrubbed.
-	keep := []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
+	keep := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
 	out, err := runCLI(ctx, "claude", keep, "-p", "/usage", "--output-format", "json", "--no-session-persistence")
 	switch {
 	case errors.Is(err, errNotInstalled):
@@ -64,6 +64,10 @@ func (Claude) Fetch(ctx context.Context) status.Provider {
 		return res
 	}
 	windows := parseClaudeUsage(result.Result, time.Now())
+	if len(windows) == 0 && strings.Contains(result.Result, "% used") {
+		res.State, res.Note = status.StateError, "claude /usage output format is not recognised; update substatus"
+		return res
+	}
 	if len(windows) == 0 {
 		res.State, res.Note = status.StateUnavailable, "claude /usage reported no subscription quota; API-key billing has none"
 		return res
@@ -97,7 +101,8 @@ func parseClaudeUsage(text string, now time.Time) []status.Window {
 }
 
 // parseClaudeReset parses "Oct 14, 10am (UTC)" or "1:50pm (Europe/Paris)".
-// The year and, for time-only values, the date are the next ones after now.
+// A missing year (or, for time-only values, date) is the earliest one that
+// is not more than resetSkew in the past: /usage only shows upcoming resets.
 func parseClaudeReset(s string, now time.Time) time.Time {
 	value, zone, ok := strings.Cut(strings.TrimSuffix(strings.TrimSpace(s), ")"), " (")
 	if !ok {
@@ -114,21 +119,34 @@ func parseClaudeReset(s string, now time.Time) time.Time {
 		}
 	}
 	for _, layout := range []string{"Jan 2, 3:04pm", "Jan 2, 3pm"} {
-		if t, err := time.ParseInLocation(layout, value, loc); err == nil {
-			t = t.AddDate(now.Year()-t.Year(), 0, 0)
-			if t.Before(now.Add(-24 * time.Hour)) {
-				t = t.AddDate(1, 0, 0)
+		if t, err := time.Parse(layout, value); err == nil {
+			var candidates []time.Time
+			for y := now.Year() - 1; y <= now.Year()+1; y++ {
+				c := time.Date(y, t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, loc)
+				if c.Month() == t.Month() { // Feb 29 exists only in leap years
+					candidates = append(candidates, c)
+				}
 			}
-			return t
+			return earliestAfter(candidates, now.Add(-resetSkew))
 		}
 	}
 	for _, layout := range []string{"3:04pm", "3pm"} {
-		if t, err := time.ParseInLocation(layout, value, loc); err == nil {
-			t = time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, loc)
-			if t.Before(now) {
-				t = t.AddDate(0, 0, 1)
-			}
-			return t
+		if t, err := time.Parse(layout, value); err == nil {
+			today := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, loc)
+			return earliestAfter([]time.Time{today, today.AddDate(0, 0, 1)}, now.Add(-resetSkew))
+		}
+	}
+	return time.Time{}
+}
+
+// resetSkew tolerates clock skew and output that is a little stale.
+const resetSkew = time.Hour
+
+// earliestAfter returns the first of the ascending candidates not before min.
+func earliestAfter(candidates []time.Time, min time.Time) time.Time {
+	for _, c := range candidates {
+		if !c.Before(min) {
+			return c
 		}
 	}
 	return time.Time{}

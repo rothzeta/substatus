@@ -15,22 +15,11 @@ func TestFormatPercent(t *testing.T) {
 		{99.996, "100%"},
 		{100, "100%"},
 		{112.5, "112.5%"},
-		{-1, "?"},
-		{-0.5, "?"},
 	}
 	for _, tt := range tests {
 		if got := FormatPercent(tt.in); got != tt.want {
 			t.Errorf("FormatPercent(%v) = %q, want %q", tt.in, got, tt.want)
 		}
-	}
-}
-
-func TestWindowKnown(t *testing.T) {
-	if !(Window{Percent: 0}).Known() {
-		t.Error("0% should be known")
-	}
-	if (Window{Percent: -1}).Known() {
-		t.Error("-1 sentinel should be unknown")
 	}
 }
 

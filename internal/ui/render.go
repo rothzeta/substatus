@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/rothzeta/substatus/internal/status"
+	"github.com/rothzeta/substatus/internal/term"
 )
 
 // ANSI codes.
@@ -51,7 +52,7 @@ func (p Palette) Blue(s string) string   { return p.wrap(fgBlue, s) }
 
 // ColorEnabled reports whether ANSI color should be used on out.
 func ColorEnabled(noColorFlag bool, out *os.File) bool {
-	return !noColorFlag && os.Getenv("NO_COLOR") == "" && IsTerminal(out)
+	return !noColorFlag && os.Getenv("NO_COLOR") == "" && term.IsTerminal(out)
 }
 
 // RenderOnce writes a plain-text snapshot for scripting (no cursor control).
@@ -117,19 +118,14 @@ func windowLine(w status.Window, pal Palette) string {
 	return line
 }
 
-// progressBar renders a used-percent bar; unknown percentages render hollow.
+// progressBar renders a used-percent bar, full at 100% and above.
 func progressBar(percent float64, width int) string {
-	if percent < 0 {
-		return strings.Repeat("░", width)
-	}
 	filled := int(math.Round(min(percent, 100) / 100 * float64(width)))
 	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 }
 
 func colorByPercent(s string, percent float64, pal Palette) string {
 	switch {
-	case percent < 0:
-		return pal.Gray(s)
 	case percent >= 90:
 		return pal.Red(s)
 	case percent >= 70:

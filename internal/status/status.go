@@ -55,16 +55,13 @@ func (q SourceQuality) String() string {
 }
 
 // Window is a single quota/usage window within a provider. Percent is the
-// used percentage when known; -1 means unknown. A zero ResetsAt means the
-// provider reported no reset time.
+// used percentage; providers omit windows whose usage is unknown. A zero
+// ResetsAt means the provider reported no reset time.
 type Window struct {
 	Label    string
 	Percent  float64
 	ResetsAt time.Time
 }
-
-// Known reports whether the window carries a percentage.
-func (w Window) Known() bool { return w.Percent >= 0 }
 
 // Provider is one provider's status.
 type Provider struct {
@@ -89,11 +86,7 @@ type Snapshot struct {
 	Refreshing bool
 }
 
-// FormatPercent renders a used percentage to at most two decimals, handling
-// the unknown sentinel.
+// FormatPercent renders a used percentage to at most two decimals.
 func FormatPercent(p float64) string {
-	if p < 0 {
-		return "?"
-	}
 	return strconv.FormatFloat(math.Round(p*100)/100, 'f', -1, 64) + "%"
 }

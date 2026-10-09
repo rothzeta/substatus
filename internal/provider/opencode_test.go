@@ -50,6 +50,7 @@ func TestOpenCodeFetchesGoUsageFromFirstPartyAPI(t *testing.T) {
 
 func TestOpenCodeWithoutAPIKeyDoesNotMakeRequest(t *testing.T) {
 	t.Setenv("OPENCODE_API_KEY", "")
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	called := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
@@ -114,6 +115,7 @@ func TestOpenCodeMalformedUsageIsError(t *testing.T) {
 
 func TestOpenCodeUsesSavedKeyWhenEnvUnset(t *testing.T) {
 	t.Setenv("OPENCODE_API_KEY", "")
+	t.Setenv("HOME", t.TempDir()) // macOS config dir
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	if err := SaveOpenCodeKey("saved-key"); err != nil {
 		t.Fatal(err)
@@ -139,10 +141,33 @@ func TestOpenCodeUsesSavedKeyWhenEnvUnset(t *testing.T) {
 }
 
 func TestSaveOpenCodeKeyRejectsMalformedKeys(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for _, key := range []string{"", "   ", "two words"} {
 		if err := SaveOpenCodeKey(key); err == nil {
 			t.Errorf("accepted %q", key)
 		}
+	}
+}
+
+func TestOpenCodeDoesNotFollowRedirects(t *testing.T) {
+	t.Setenv("OPENCODE_API_KEY", "redirect-key")
+	leaked := make(chan string, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked <- r.Header.Get("Authorization")
+	}))
+	defer target.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer server.Close()
+
+	if got := (OpenCode{baseURL: server.URL}).Fetch(context.Background()); got.State != status.StateError {
+		t.Fatalf("got %+v", got)
+	}
+	select {
+	case <-leaked:
+		t.Fatal("followed a redirect with the bearer key")
+	default:
 	}
 }

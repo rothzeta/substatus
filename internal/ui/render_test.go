@@ -89,9 +89,6 @@ func TestRenderOnceShowsPercentAndSource(t *testing.T) {
 }
 
 func TestProgressBarClamps(t *testing.T) {
-	if got := progressBar(-1, 10); got != "░░░░░░░░░░" {
-		t.Errorf("unknown = %q", got)
-	}
 	if got := progressBar(0, 10); got != "░░░░░░░░░░" {
 		t.Errorf("0%% = %q", got)
 	}
