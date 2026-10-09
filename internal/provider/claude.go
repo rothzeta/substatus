@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/local/substatus/internal/status"
+	"github.com/rothzeta/substatus/internal/status"
 )
 
 // Claude runs Claude Code's own /usage command in print mode. Claude Code

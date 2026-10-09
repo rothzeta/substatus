@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/local/substatus/internal/status"
+	"github.com/rothzeta/substatus/internal/status"
 )
 
 // clearScreen clears the terminal and homes the cursor.

@@ -1,3 +1,3 @@
-module github.com/local/substatus
+module github.com/rothzeta/substatus
 
 go 1.24
