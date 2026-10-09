@@ -23,6 +23,8 @@ substatus [flags]
 ```
 
 Interactive keys: `r` refreshes, `q` or Ctrl-C quits. The UI redraws on resize.
+Every provider row appears immediately as loading and fills in as soon as that
+provider answers, so one slow CLI never holds up the others.
 
 ## Provider sources
 
@@ -89,7 +91,8 @@ no files.
 
 Tests use synthetic CLI output and fake HTTP servers. They cover protocol ordering,
 quota parsing, missing/null values, disabled buckets, invalid percentages, reset
-handling and year inference, cancellation, and rejection of Claude model turns.
+handling and year inference, cancellation, rejection of Claude model turns, and progressive snapshot
+delivery.
 They do not prove live account access or a particular installed CLI's JSON shape.
 
 ```sh

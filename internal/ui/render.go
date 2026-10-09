@@ -73,9 +73,14 @@ func RenderOnce(w io.Writer, snap status.Snapshot, pal Palette) {
 
 // header renders the top summary line.
 func header(snap status.Snapshot, pal Palette) string {
-	label := pal.Bold("Subscription status")
-	when := pal.Dim(snap.CheckedAt.Format("2006-01-02 15:04:05"))
-	return label + "  " + when
+	when := "checking…"
+	if !snap.CheckedAt.IsZero() {
+		when = snap.CheckedAt.Format("2006-01-02 15:04:05")
+		if snap.Refreshing {
+			when += " · refreshing…"
+		}
+	}
+	return pal.Bold("Subscription status") + "  " + pal.Dim(when)
 }
 
 // card renders one provider as a two-line block.

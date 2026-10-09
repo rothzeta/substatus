@@ -82,9 +82,11 @@ type Provider struct {
 
 // Snapshot is the state of every provider at one moment. CheckedAt is when the
 // latest full refresh cycle completed; it is zero until the first one does.
+// Refreshing reports that a cycle is still in flight.
 type Snapshot struct {
-	Providers []Provider
-	CheckedAt time.Time
+	Providers  []Provider
+	CheckedAt  time.Time
+	Refreshing bool
 }
 
 // FormatPercent renders a used percentage to at most two decimals, handling

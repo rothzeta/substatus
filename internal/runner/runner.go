@@ -1,15 +1,15 @@
-// Package runner aggregates providers into a status snapshot.
+// Package runner aggregates providers into status snapshots.
 package runner
 
 import (
 	"context"
-	"sync"
+	"slices"
 	"time"
 
 	"github.com/local/substatus/internal/status"
 )
 
-// Default interval between refresh cycles.
+// DefaultInterval is the default time between refresh cycles.
 const DefaultInterval = 60 * time.Second
 
 // Provider reports one provider's status. Fetch need not set Name.
@@ -18,72 +18,112 @@ type Provider interface {
 	Fetch(ctx context.Context) status.Provider
 }
 
-// Runner refreshes all providers concurrently.
+// Runner refreshes providers concurrently on an interval.
 type Runner struct {
-	Providers []Provider
-	Interval  time.Duration
+	providers []Provider
+	interval  time.Duration
 }
 
-// New returns a Runner over the given providers.
-func New(ps ...Provider) *Runner {
-	return &Runner{Providers: ps, Interval: DefaultInterval}
-}
-
-// Refresh queries every provider in parallel and returns a snapshot in
-// provider order. A failing provider never prevents the others from reporting.
-func (r *Runner) Refresh(ctx context.Context) status.Snapshot {
-	results := make([]status.Provider, len(r.Providers))
-	var wg sync.WaitGroup
-	for i, p := range r.Providers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			results[i] = fetch(ctx, p)
-		}()
-	}
-	wg.Wait()
-	return status.Snapshot{Providers: results, CheckedAt: time.Now()}
-}
-
-func fetch(ctx context.Context, p Provider) status.Provider {
-	res := p.Fetch(ctx)
-	res.Name = p.Name()
-	return res
-}
-
-// Watch refreshes immediately and then on every tick until ctx is cancelled,
-// emitting each snapshot on the returned channel.
-func (r *Runner) Watch(ctx context.Context) <-chan status.Snapshot {
-	interval := r.Interval
+// New returns a Runner over providers, in display order. A non-positive
+// interval means DefaultInterval.
+func New(interval time.Duration, providers ...Provider) Runner {
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
-	ch := make(chan status.Snapshot)
+	return Runner{providers: slices.Clone(providers), interval: interval}
+}
+
+// Refresh runs one full cycle and returns its final snapshot. If ctx ends
+// first, it returns the latest partial snapshot.
+func (r Runner) Refresh(ctx context.Context) status.Snapshot {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var last status.Snapshot
+	for snap := range r.Watch(ctx, nil) {
+		last = snap
+		if !snap.CheckedAt.IsZero() {
+			break
+		}
+	}
+	return last
+}
+
+// Watch starts a refresh cycle immediately, then on every tick and on every
+// receive from refresh (which may be nil). It emits a snapshot right away with
+// every provider loading, then a new one whenever a cycle starts or any
+// provider finishes, so one slow provider never delays the others. A cycle
+// never overlaps the previous one. The channel closes when ctx ends.
+func (r Runner) Watch(ctx context.Context, refresh <-chan struct{}) <-chan status.Snapshot {
+	out := make(chan status.Snapshot)
 	go func() {
-		defer close(ch)
-		send := func(s status.Snapshot) bool {
+		defer close(out)
+		type result struct {
+			i int
+			p status.Provider
+		}
+		results := make(chan result)
+		rows := make([]status.Provider, len(r.providers))
+		for i, p := range r.providers {
+			rows[i] = status.Provider{Name: p.Name(), State: status.StateLoading}
+		}
+		var checkedAt time.Time
+		pending := 0
+
+		emit := func() bool {
+			snap := status.Snapshot{Providers: slices.Clone(rows), CheckedAt: checkedAt, Refreshing: pending > 0}
 			select {
-			case ch <- s:
+			case out <- snap:
 				return true
 			case <-ctx.Done():
 				return false
 			}
 		}
-		if !send(r.Refresh(ctx)) {
+		start := func() bool {
+			if pending > 0 {
+				return true // the cycle in flight will deliver fresh data
+			}
+			if len(r.providers) == 0 {
+				checkedAt = time.Now()
+			}
+			pending = len(r.providers)
+			for i, p := range r.providers {
+				go func() {
+					res := p.Fetch(ctx)
+					res.Name = p.Name()
+					select {
+					case results <- result{i, res}:
+					case <-ctx.Done():
+					}
+				}()
+			}
+			return emit()
+		}
+
+		if !start() {
 			return
 		}
-		t := time.NewTicker(interval)
-		defer t.Stop()
+		tick := time.NewTicker(r.interval)
+		defer tick.Stop()
 		for {
+			ok := true
 			select {
 			case <-ctx.Done():
 				return
-			case <-t.C:
-				if !send(r.Refresh(ctx)) {
-					return
+			case <-tick.C:
+				ok = start()
+			case <-refresh:
+				ok = start()
+			case res := <-results:
+				rows[res.i] = res.p
+				if pending--; pending == 0 {
+					checkedAt = time.Now()
 				}
+				ok = emit()
+			}
+			if !ok {
+				return
 			}
 		}
 	}()
-	return ch
+	return out
 }
