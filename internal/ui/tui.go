@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rothzeta/substatus/internal/status"
+	"github.com/rothzeta/substatus/internal/term"
 )
 
 // clearScreen clears the terminal and homes the cursor.
@@ -52,7 +53,7 @@ func (t *TUI) Quit() <-chan struct{} { return t.quit }
 // Start enables raw terminal input where supported and starts the key reader.
 // The returned function restores the terminal's previous settings.
 func (t *TUI) Start() (restore func()) {
-	restore, err := enableRawInput(t.opts.In)
+	restore, err := term.MakeRaw(t.opts.In)
 	if err != nil {
 		restore = func() {} // line-buffered input still works
 	}

@@ -4,13 +4,14 @@ package runner
 import (
 	"context"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/rothzeta/substatus/internal/status"
 )
 
 // DefaultInterval is the default time between refresh cycles.
-const DefaultInterval = 60 * time.Second
+const DefaultInterval = 5 * time.Minute
 
 // Provider reports one provider's status. Fetch need not set Name.
 type Provider interface {
@@ -52,11 +53,14 @@ func (r Runner) Refresh(ctx context.Context) status.Snapshot {
 // receive from refresh (which may be nil). It emits a snapshot right away with
 // every provider loading, then a new one whenever a cycle starts or any
 // provider finishes, so one slow provider never delays the others. A cycle
-// never overlaps the previous one. The channel closes when ctx ends.
+// never overlaps the previous one. The channel closes when ctx ends and every
+// in-flight fetch has returned, so provider subprocesses are reaped by then.
 func (r Runner) Watch(ctx context.Context, refresh <-chan struct{}) <-chan status.Snapshot {
 	out := make(chan status.Snapshot)
 	go func() {
+		var fetches sync.WaitGroup
 		defer close(out)
+		defer fetches.Wait()
 		type result struct {
 			i int
 			p status.Provider
@@ -86,10 +90,11 @@ func (r Runner) Watch(ctx context.Context, refresh <-chan struct{}) <-chan statu
 				checkedAt = time.Now()
 			}
 			pending = len(r.providers)
+			fetches.Add(len(r.providers))
 			for i, p := range r.providers {
 				go func() {
-					res := p.Fetch(ctx)
-					res.Name = p.Name()
+					defer fetches.Done()
+					res := fetch(ctx, p)
 					select {
 					case results <- result{i, res}:
 					case <-ctx.Done():
@@ -126,4 +131,16 @@ func (r Runner) Watch(ctx context.Context, refresh <-chan struct{}) <-chan statu
 		}
 	}()
 	return out
+}
+
+// fetch runs one provider check, reporting a panic as an error row instead of
+// crashing the program with the terminal still in raw mode.
+func fetch(ctx context.Context, p Provider) (res status.Provider) {
+	defer func() {
+		if recover() != nil {
+			res = status.Provider{State: status.StateError, Note: "provider check crashed"}
+		}
+		res.Name = p.Name()
+	}()
+	return p.Fetch(ctx)
 }

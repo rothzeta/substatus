@@ -130,7 +130,9 @@ func (o OpenCode) get(ctx context.Context, key string) ([]byte, int, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Accept", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	// Never follow redirects: they could carry the bearer key elsewhere.
+	client := http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}

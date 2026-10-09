@@ -153,3 +153,41 @@ func TestRefreshWithoutProvidersCompletes(t *testing.T) {
 		t.Fatal("empty refresh never completed")
 	}
 }
+
+type panicProvider struct{}
+
+func (panicProvider) Name() string                          { return "Boom" }
+func (panicProvider) Fetch(context.Context) status.Provider { panic("boom") }
+
+func TestPanickingProviderBecomesErrorRow(t *testing.T) {
+	snap := New(time.Hour, panicProvider{}).Refresh(context.Background())
+	if p := snap.Providers[0]; p.Name != "Boom" || p.State != status.StateError {
+		t.Fatalf("got %+v", p)
+	}
+}
+
+func TestWatchClosesOnlyAfterFetchesReturn(t *testing.T) {
+	var returned atomic.Bool
+	p := &blockingProvider{returned: &returned}
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := New(time.Hour, p).Watch(ctx, nil)
+	next(t, ch)
+	cancel()
+	for range ch {
+	}
+	if !returned.Load() {
+		t.Fatal("watch closed while a fetch was still running")
+	}
+}
+
+// blockingProvider blocks until cancelled, then lingers briefly before
+// returning, like a CLI being killed.
+type blockingProvider struct{ returned *atomic.Bool }
+
+func (blockingProvider) Name() string { return "Slow" }
+func (b *blockingProvider) Fetch(ctx context.Context) status.Provider {
+	<-ctx.Done()
+	time.Sleep(50 * time.Millisecond)
+	b.returned.Store(true)
+	return status.Provider{}
+}

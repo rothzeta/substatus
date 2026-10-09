@@ -19,11 +19,13 @@ import (
 // Codex delegates authentication and quota retrieval to the provider's CLI.
 // Only documented app-server methods are used; this app never reads auth files,
 // exports tokens, sends prompts, or calls Codex backend endpoints.
-type Codex struct{}
+type Codex struct {
+	ClientVersion string // reported in the app-server handshake
+}
 
 func (Codex) Name() string { return "Codex" }
 
-func (Codex) Fetch(ctx context.Context) status.Provider {
+func (c Codex) Fetch(ctx context.Context) status.Provider {
 	res := status.Provider{
 		Source:  "codex app-server: account/rateLimits/read",
 		Quality: status.QualityCLI,
@@ -33,11 +35,16 @@ func (Codex) Fetch(ctx context.Context) status.Provider {
 		res.State, res.Note = status.StateNotInstalled, "`codex` CLI not found on PATH"
 		return res
 	}
+	dir, err := os.MkdirTemp("", "substatus-")
+	if err != nil {
+		return codexFailure(ctx, res, err)
+	}
+	defer os.RemoveAll(dir)
 	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "app-server")
 	cmd.Env = envWithoutSecrets(os.Environ())
-	cmd.Dir = os.TempDir()
+	cmd.Dir = dir // private and empty: no project configuration is picked up
 	cmd.WaitDelay = time.Second
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -69,7 +76,7 @@ func (Codex) Fetch(ctx context.Context) status.Provider {
 	var initialized struct{}
 	err = rpc.call("initialize", map[string]any{
 		"clientInfo": map[string]string{
-			"name": "substatus", "title": "Subscription status", "version": Version,
+			"name": "substatus", "title": "Subscription status", "version": c.ClientVersion,
 		},
 	}, &initialized)
 	if err != nil {

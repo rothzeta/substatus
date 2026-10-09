@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,7 +115,7 @@ func TestParseClaudeResetInfersYearAndDay(t *testing.T) {
 	for in, want := range map[string]time.Time{
 		"Jan 3, 10am (UTC)":        time.Date(2027, 1, 3, 10, 0, 0, 0, time.UTC),
 		"Dec 30, 1:50pm (UTC)":     time.Date(2026, 12, 30, 13, 50, 0, 0, time.UTC),
-		"11am (UTC)":               time.Date(2026, 12, 31, 11, 0, 0, 0, time.UTC),
+		"10am (UTC)":               time.Date(2026, 12, 31, 10, 0, 0, 0, time.UTC),
 		"Feb 1, 2027, 9am (UTC)":   time.Date(2027, 2, 1, 9, 0, 0, 0, time.UTC),
 		"Dec 31, 9am (Asia/Tokyo)": time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
 		"Dec 31, 9am (Not/AZone)":  {},
@@ -124,5 +125,58 @@ func TestParseClaudeResetInfersYearAndDay(t *testing.T) {
 		if got := parseClaudeReset(in, now); !got.Equal(want) {
 			t.Errorf("parseClaudeReset(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+func TestParseClaudeResetHandlesLeapDay(t *testing.T) {
+	now := time.Date(2027, 12, 1, 0, 0, 0, 0, time.UTC)
+	want := time.Date(2028, 2, 29, 10, 0, 0, 0, time.UTC)
+	if got := parseClaudeReset("Feb 29, 10am (UTC)", now); !got.Equal(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestClaudeUnrecognisedFormatIsAnError(t *testing.T) {
+	claudeCLI(t, `{"type":"result","subtype":"success","num_turns":0,"local_command":"usage","result":"Session — 4% used, resetting soon"}`)
+	if got := (Claude{}).Fetch(context.Background()); got.State != status.StateError {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestRunCLIUsesPrivateDirAndCapsOutput(t *testing.T) {
+	pwdFile := filepath.Join(t.TempDir(), "pwd")
+	t.Setenv("SUBSTATUS_TEST_PWD", pwdFile)
+	fakeCLI(t, "tool", `printf '%s' "$PWD" > "$SUBSTATUS_TEST_PWD"
+printf ok
+`)
+	out, err := runCLI(context.Background(), "tool", nil)
+	if err != nil || string(out) != "ok" {
+		t.Fatalf("out = %q, err = %v", out, err)
+	}
+	dir, _ := os.ReadFile(pwdFile)
+	if string(dir) == "" || string(dir) == os.TempDir() || !strings.Contains(filepath.Base(string(dir)), "substatus-") {
+		t.Fatalf("CLI ran in %q, want a private substatus- directory", dir)
+	}
+	if _, err := os.Stat(string(dir)); !os.IsNotExist(err) {
+		t.Fatalf("private directory %q not removed: %v", dir, err)
+	}
+
+	// 2 MiB of output from a shell loop (no external commands on PATH).
+	fakeCLI(t, "tool", `chunk=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+i=0
+while [ $i -lt 32768 ]; do printf '%s\n' "$chunk"; i=$((i+1)); done
+`)
+	if out, err := runCLI(context.Background(), "tool", nil); !errors.Is(err, errOutputLimit) || out != nil {
+		t.Fatalf("len(out) = %d, err = %v; want errOutputLimit", len(out), err)
+	}
+}
+
+func TestEnvWithoutSecretsKeepsOnlyNamedCredentials(t *testing.T) {
+	got := envWithoutSecrets([]string{
+		"PATH=/bin", "HOME=/h", "OPENCODE_API_KEY=a", "GITHUB_TOKEN=b", "AWS_SECRET_ACCESS_KEY=c",
+		"MY_SECRET=d", "DB_PASSWORD=e", "CLAUDE_CODE_OAUTH_TOKEN=f",
+	}, "CLAUDE_CODE_OAUTH_TOKEN")
+	if strings.Join(got, ",") != "PATH=/bin,HOME=/h,CLAUDE_CODE_OAUTH_TOKEN=f" {
+		t.Fatalf("env = %v", got)
 	}
 }

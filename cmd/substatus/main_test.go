@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rothzeta/substatus/internal/provider"
 )
 
 func TestHelpExitsZeroAndListsProviders(t *testing.T) {
@@ -31,12 +33,12 @@ func TestVersionFlag(t *testing.T) {
 	}
 }
 
-func TestNonPositiveRefreshRejected(t *testing.T) {
+func TestTooShortRefreshRejected(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	if code := run([]string{"--refresh", "0s", "--once"}, nil, &out, &errBuf); code != 2 {
+	if code := run([]string{"--refresh", "1s", "--once"}, nil, &out, &errBuf); code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
 	}
-	if !strings.Contains(errBuf.String(), "positive") {
+	if !strings.Contains(errBuf.String(), "at least") {
 		t.Errorf("stderr = %q", errBuf.String())
 	}
 }
@@ -82,7 +84,7 @@ func TestOnceOutputInSanitizedEnvironment(t *testing.T) {
 }
 
 func TestSetOpenCodeKeyFromPipeIsSavedPrivately(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	isolateConfig(t)
 	in := filepath.Join(t.TempDir(), "key")
 	if err := os.WriteFile(in, []byte("  test-key-123\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -100,7 +102,10 @@ func TestSetOpenCodeKeyFromPipeIsSavedPrivately(t *testing.T) {
 	if strings.Contains(out.String()+errBuf.String(), "test-key-123") {
 		t.Fatal("key echoed to output")
 	}
-	path := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "substatus", "opencode_api_key")
+	path, err := provider.OpenCodeKeyPath()
+	if err != nil {
+		t.Fatal(err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil || string(data) != "test-key-123\n" {
 		t.Fatalf("saved key = %q, %v", data, err)
@@ -111,8 +116,8 @@ func TestSetOpenCodeKeyFromPipeIsSavedPrivately(t *testing.T) {
 }
 
 func TestSetOpenCodeKeyRejectsEmptyInput(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	f, err := os.Open(os.DevNull)
+	isolateConfig(t)
+	f, err := os.Create(filepath.Join(t.TempDir(), "empty"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,4 +126,31 @@ func TestSetOpenCodeKeyRejectsEmptyInput(t *testing.T) {
 	if code := run([]string{"--set-opencode-key"}, f, &out, &errBuf); code != 1 {
 		t.Fatalf("exit = %d", code)
 	}
+	if !strings.Contains(errBuf.String(), "single non-empty token") {
+		t.Fatalf("stderr = %q; want the empty-key validation error", errBuf.String())
+	}
+}
+
+func TestInteractiveModeNeedsTerminal(t *testing.T) {
+	f, err := os.Create(filepath.Join(t.TempDir(), "in"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var out, errBuf bytes.Buffer
+	if code := run(nil, f, &out, &errBuf); code != 2 || !strings.Contains(errBuf.String(), "--once") {
+		t.Fatalf("exit = %d, stderr = %q", code, errBuf.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("wrote %q to a non-terminal", out.String())
+	}
+}
+
+// isolateConfig points the user config directory at a temp dir on every OS
+// (os.UserConfigDir uses XDG_CONFIG_HOME on Linux, HOME on macOS).
+func isolateConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("AppData", t.TempDir())
 }

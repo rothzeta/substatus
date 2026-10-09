@@ -22,7 +22,7 @@ func TestGeminiUsesTheDocumentedAgyUsageCommand(t *testing.T) {
 	argsPath := filepath.Join(t.TempDir(), "args")
 	inheritedKeyPath := filepath.Join(t.TempDir(), "inherited-key")
 	fixture := `{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"weekly","name":"Weekly","window":"weekly","remaining_fraction":0.6,"reset_time":"2030-01-03T00:00:00Z"}]}]}}}`
-	script := "#!/bin/sh\nprintf '%s' \"$*\" > \"$SUBSTATUS_TEST_ARGS\"\nprintf '%s' \"${OPENCODE_API_KEY-}\" > \"$SUBSTATUS_TEST_KEY\"\nprintf '%s' '" + fixture + "'\n"
+	script := "#!/bin/sh\nprintf '%s' \"$*\" > \"$SUBSTATUS_TEST_ARGS\"\nprintf '%s' \"${OPENCODE_API_KEY-}\" > \"$SUBSTATUS_TEST_INHERITED\"\nprintf '%s' '" + fixture + "'\n"
 	agyPath := filepath.Join(binDir, "agy")
 	if err := os.WriteFile(agyPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
@@ -30,7 +30,7 @@ func TestGeminiUsesTheDocumentedAgyUsageCommand(t *testing.T) {
 	t.Setenv("PATH", binDir)
 	t.Setenv("HOME", t.TempDir()) // no CLI credential file for the provider to read
 	t.Setenv("SUBSTATUS_TEST_ARGS", argsPath)
-	t.Setenv("SUBSTATUS_TEST_KEY", inheritedKeyPath)
+	t.Setenv("SUBSTATUS_TEST_INHERITED", inheritedKeyPath)
 	t.Setenv("OPENCODE_API_KEY", "synthetic-opencode-key")
 
 	got := (&Gemini{}).Fetch(context.Background())
