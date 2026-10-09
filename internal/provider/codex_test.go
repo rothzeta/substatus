@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/local/substatus/internal/status"
 )
 
 func fakeCLI(t *testing.T, name, script string) {
@@ -50,13 +52,13 @@ func TestCodexReadsDocumentedAppServerStatus(t *testing.T) {
 		`{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":99}},"rateLimitsByLimitId":{"codex":{"planType":"pro","primary":{"usedPercent":25,"windowDurationMins":300,"resetsAt":1893456000},"secondary":{"usedPercent":42,"windowDurationMins":10080}},"other":{"limitName":"Other","primary":{"usedPercent":0,"windowDurationMins":60}}}}}`,
 	))
 	got := (Codex{}).Fetch(context.Background())
-	if got.State != ResOK || got.Plan != "pro" || len(got.Windows) != 3 {
+	if got.State != status.StateOK || got.Plan != "pro" || len(got.Windows) != 3 {
 		t.Fatalf("got %+v", got)
 	}
-	if got.Windows[0].Label != "codex 5h" || got.Windows[0].Percent != 25 || !got.Windows[0].HasReset || got.Windows[0].ResetsAt.Unix() != 1893456000 {
+	if got.Windows[0].Label != "codex 5h" || got.Windows[0].Percent != 25 || got.Windows[0].ResetsAt.IsZero() || got.Windows[0].ResetsAt.Unix() != 1893456000 {
 		t.Fatalf("primary = %+v", got.Windows[0])
 	}
-	if got.Windows[1].Label != "codex 7d" || got.Windows[1].Percent != 42 || got.Windows[1].HasReset {
+	if got.Windows[1].Label != "codex 7d" || got.Windows[1].Percent != 42 || !got.Windows[1].ResetsAt.IsZero() {
 		t.Fatalf("secondary = %+v", got.Windows[1])
 	}
 	if strings.Contains(got.Note, "private@example.test") {
@@ -71,7 +73,7 @@ func TestCodexParsesDocumentedRateLimitsExample(t *testing.T) {
 		`{"id":3,"result":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":25,"windowDurationMins":15,"resetsAt":1730947200},"secondary":null,"rateLimitReachedType":null},"rateLimitsByLimitId":{"codex":{"limitId":"codex","limitName":null,"primary":{"usedPercent":25,"windowDurationMins":15,"resetsAt":1730947200},"secondary":null,"rateLimitReachedType":null},"codex_other":{"limitId":"codex_other","limitName":"codex_other","primary":{"usedPercent":42,"windowDurationMins":60,"resetsAt":1730950800},"secondary":null,"rateLimitReachedType":null}},"rateLimitResetCredits":{"availableCount":2,"credits":null}}}`,
 	))
 	got := (Codex{}).Fetch(context.Background())
-	if got.State != ResOK || got.Plan != "pro" || len(got.Windows) != 2 {
+	if got.State != status.StateOK || got.Plan != "pro" || len(got.Windows) != 2 {
 		t.Fatalf("got %+v", got)
 	}
 	if w := got.Windows[0]; w.Label != "codex 15m" || w.Percent != 25 || w.ResetsAt.Unix() != 1730947200 {
@@ -86,16 +88,16 @@ func TestCodexFallbackAndMissingPercent(t *testing.T) {
 	for _, tc := range []struct {
 		limits  string
 		windows int
-		state   ResultState
+		state   status.State
 	}{
-		{`{"primary":{"usedPercent":0,"windowDurationMins":15}}`, 1, ResOK},
-		{`{"primary":{"windowDurationMins":300}}`, 0, ResUnavailable},
-		{`{"primary":{"usedPercent":null}}`, 0, ResUnavailable},
-		{`{"primary":{"usedPercent":101}}`, 0, ResError},
-		{`{"primary":{"usedPercent":-1}}`, 0, ResError},
-		{`{"primary":{"usedPercent":40,"windowDurationMins":0}}`, 0, ResError},
-		{`{"primary":{"usedPercent":40,"resetsAt":0}}`, 0, ResError},
-		{`{}`, 0, ResUnavailable},
+		{`{"primary":{"usedPercent":0,"windowDurationMins":15}}`, 1, status.StateOK},
+		{`{"primary":{"windowDurationMins":300}}`, 0, status.StateUnavailable},
+		{`{"primary":{"usedPercent":null}}`, 0, status.StateUnavailable},
+		{`{"primary":{"usedPercent":101}}`, 0, status.StateError},
+		{`{"primary":{"usedPercent":-1}}`, 0, status.StateError},
+		{`{"primary":{"usedPercent":40,"windowDurationMins":0}}`, 0, status.StateError},
+		{`{"primary":{"usedPercent":40,"resetsAt":0}}`, 0, status.StateError},
+		{`{}`, 0, status.StateUnavailable},
 	} {
 		fakeCLI(t, "codex", codexScript(
 			`{"account":{"type":"chatgpt"}}`,
@@ -111,17 +113,17 @@ func TestCodexFallbackAndMissingPercent(t *testing.T) {
 func TestCodexAuthAndProtocolFailures(t *testing.T) {
 	for _, tc := range []struct {
 		account, limits string
-		state           ResultState
+		state           status.State
 	}{
-		{`{"account":null,"requiresOpenaiAuth":true}`, `{}`, ResAuthMissing},
-		{`{"account":null}`, `{}`, ResAuthMissing},
-		{`{"account":null,"requiresOpenaiAuth":false}`, `{}`, ResUnavailable},
-		{`{"account":{"type":"amazonBedrock","credentialSource":"awsManaged"},"requiresOpenaiAuth":false}`, `{}`, ResUnavailable},
-		{`{"account":{"type":"apiKey"}}`, `{}`, ResUnavailable},
-		{`{"account":{"type":"chatgpt"}}`, `{"id":3,"error":{"code":-32601,"message":"private-token"}}`, ResUnsupported},
-		{`{"account":{"type":"chatgpt"}}`, `{"id":3,"error":{"code":-32000,"message":"private-token"}}`, ResError},
-		{`{"account":{"type":"chatgpt"}}`, `not-json-private-token`, ResError},
-		{`{"account":{"type":"chatgpt"}}`, `{"id":99,"result":{}}`, ResError},
+		{`{"account":null,"requiresOpenaiAuth":true}`, `{}`, status.StateAuthMissing},
+		{`{"account":null}`, `{}`, status.StateAuthMissing},
+		{`{"account":null,"requiresOpenaiAuth":false}`, `{}`, status.StateUnavailable},
+		{`{"account":{"type":"amazonBedrock","credentialSource":"awsManaged"},"requiresOpenaiAuth":false}`, `{}`, status.StateUnavailable},
+		{`{"account":{"type":"apiKey"}}`, `{}`, status.StateUnavailable},
+		{`{"account":{"type":"chatgpt"}}`, `{"id":3,"error":{"code":-32601,"message":"private-token"}}`, status.StateUnsupported},
+		{`{"account":{"type":"chatgpt"}}`, `{"id":3,"error":{"code":-32000,"message":"private-token"}}`, status.StateError},
+		{`{"account":{"type":"chatgpt"}}`, `not-json-private-token`, status.StateError},
+		{`{"account":{"type":"chatgpt"}}`, `{"id":99,"result":{}}`, status.StateError},
 	} {
 		fakeCLI(t, "codex", codexScript(tc.account, tc.limits))
 		got := (Codex{}).Fetch(context.Background())
@@ -133,14 +135,14 @@ func TestCodexAuthAndProtocolFailures(t *testing.T) {
 
 func TestCodexMissingAndCancellation(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	if got := (Codex{}).Fetch(context.Background()); got.State != ResNotInstalled {
+	if got := (Codex{}).Fetch(context.Background()); got.State != status.StateNotInstalled {
 		t.Fatalf("got %+v", got)
 	}
 	fakeCLI(t, "codex", "while IFS= read -r line; do :; done\n")
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	if got := (Codex{}).Fetch(ctx); got.State != ResError || len(got.Windows) != 0 {
+	if got := (Codex{}).Fetch(ctx); got.State != status.StateError || len(got.Windows) != 0 {
 		t.Fatalf("got %+v", got)
 	}
 	if time.Since(start) > 2*time.Second {

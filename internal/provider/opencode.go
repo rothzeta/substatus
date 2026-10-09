@@ -4,48 +4,29 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/local/substatus/internal/status"
 )
 
-const opencodeUsagePath = "/zen/go/v1/usage"
+const (
+	opencodeOrigin    = "https://opencode.ai"
+	opencodeUsagePath = "/zen/go/v1/usage"
+	httpTimeout       = 10 * time.Second
+)
 
 // OpenCode reads Go subscription usage directly from OpenCode's first-party
-// Zen API. The endpoint is present in OpenCode's server source, but is not
-// covered by a stable public API contract.
+// Zen API with OPENCODE_API_KEY. The endpoint is present in OpenCode's server
+// source, but is not covered by a stable public API contract.
 type OpenCode struct {
-	// APIKey overrides OPENCODE_API_KEY (tests and explicit embedding only).
-	APIKey string
-	// BaseURL overrides the first-party origin (tests only).
-	BaseURL string
+	baseURL string // tests only; empty means opencodeOrigin
 }
 
-func (o OpenCode) Name() string { return "OpenCode" }
-
-func (o OpenCode) apiKey() string {
-	if o.APIKey != "" {
-		return strings.TrimSpace(o.APIKey)
-	}
-	return strings.TrimSpace(os.Getenv("OPENCODE_API_KEY"))
-}
-
-func (o OpenCode) baseURL() string {
-	if o.BaseURL != "" {
-		return trimSlash(o.BaseURL)
-	}
-	return "https://opencode.ai"
-}
-
-type opencodeUsageResponse struct {
-	Usage struct {
-		Rolling opencodeUsageWindow `json:"rolling"`
-		Weekly  opencodeUsageWindow `json:"weekly"`
-		Monthly opencodeUsageWindow `json:"monthly"`
-	} `json:"usage"`
-}
+func (OpenCode) Name() string { return "OpenCode" }
 
 type opencodeUsageWindow struct {
 	Status   string     `json:"status"`
@@ -53,85 +34,104 @@ type opencodeUsageWindow struct {
 	ResetsAt *time.Time `json:"resetsAt"`
 }
 
-func (o OpenCode) Fetch(ctx context.Context) Result {
-	res := Result{
+func (o OpenCode) Fetch(ctx context.Context) status.Provider {
+	res := status.Provider{
 		Source:  "OpenCode Go usage API (" + opencodeUsagePath + ")",
-		Quality: QualityPrivate,
-		Note:    "first-party endpoint; Go subscription usage only (Zen credit balance is not exposed)",
+		Quality: status.QualityPrivate,
 	}
-	key := o.apiKey()
+	key := strings.TrimSpace(os.Getenv("OPENCODE_API_KEY"))
 	if key == "" {
-		res.State = ResAuthMissing
-		res.Note = "set OPENCODE_API_KEY to query OpenCode Go subscription usage"
+		res.State, res.Note = status.StateAuthMissing, "set OPENCODE_API_KEY to query OpenCode Go subscription usage"
 		return res
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
-	defer cancel()
-	body, status, err := doJSON(ctx, http.MethodGet, o.baseURL()+opencodeUsagePath, key, map[string]string{
-		"Accept": "application/json",
-	}, nil)
+	body, code, err := o.get(ctx, key)
 	if err != nil {
-		res.State = ResError
-		res.Err = err
+		res.State, res.Note = status.StateError, "OpenCode usage request failed; check connectivity"
 		return res
 	}
-	switch status {
+	switch code {
 	case http.StatusOK:
 	case http.StatusUnauthorized:
-		res.State = ResAuthMissing
-		res.Note = "OpenCode rejected OPENCODE_API_KEY (HTTP 401)"
+		res.State, res.Note = status.StateAuthMissing, "OpenCode rejected OPENCODE_API_KEY (HTTP 401)"
 		return res
 	case http.StatusForbidden:
-		res.State = ResUnsupported
+		res.State = status.StateUnsupported
 		res.Note = "OpenCode Go usage is unavailable for this API key (HTTP 403); a Go subscription may be required"
 		return res
 	default:
-		res.State = ResError
-		res.Err = fmt.Errorf("OpenCode usage endpoint returned HTTP %d", status)
+		res.State, res.Note = status.StateError, fmt.Sprintf("OpenCode usage endpoint returned HTTP %d", code)
 		return res
 	}
 
-	var payload opencodeUsageResponse
+	var payload struct {
+		Usage struct {
+			Rolling opencodeUsageWindow `json:"rolling"`
+			Weekly  opencodeUsageWindow `json:"weekly"`
+			Monthly opencodeUsageWindow `json:"monthly"`
+		} `json:"usage"`
+	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		res.State = ResError
-		res.Err = fmt.Errorf("decode OpenCode usage: %w", err)
+		res.State, res.Note = status.StateError, "could not parse OpenCode usage response"
 		return res
 	}
-	res.State = ResOK
-	res.Plan = "Go"
+	var limited []string
 	for _, item := range []struct {
 		label  string
 		window opencodeUsageWindow
 	}{
-		{label: "rolling", window: payload.Usage.Rolling},
-		{label: "weekly", window: payload.Usage.Weekly},
-		{label: "monthly", window: payload.Usage.Monthly},
+		{"rolling", payload.Usage.Rolling},
+		{"weekly", payload.Usage.Weekly},
+		{"monthly", payload.Usage.Monthly},
 	} {
 		if item.window.Percent == nil {
 			continue
 		}
-		percent := *item.window.Percent
-		if math.IsNaN(percent) || math.IsInf(percent, 0) || percent < 0 || percent > 100 {
-			res.State = ResError
-			res.Err = fmt.Errorf("OpenCode %s usage percent is outside 0..100", item.label)
-			res.Windows = nil
+		if !validPercent(*item.window.Percent, 100) {
+			res.State, res.Windows = status.StateError, nil
+			res.Note = "OpenCode " + item.label + " usage percent is outside 0..100"
 			return res
 		}
-		w := ResultWindow{Label: item.label, Percent: percent}
+		w := status.Window{Label: item.label, Percent: *item.window.Percent}
 		if item.window.ResetsAt != nil {
 			w.ResetsAt = *item.window.ResetsAt
-			w.HasReset = true
 		}
 		res.Windows = append(res.Windows, w)
 		if item.window.Status == "rate-limited" {
-			res.Note = strings.TrimSuffix(res.Note, " (Zen credit balance is not exposed)")
-			res.Note += "; " + item.label + " usage is rate-limited"
+			limited = append(limited, item.label)
 		}
 	}
 	if len(res.Windows) == 0 {
-		res.State = ResError
-		res.Err = fmt.Errorf("OpenCode usage response contained no quota windows")
+		res.State, res.Note = status.StateError, "OpenCode usage response contained no quota windows"
+		return res
+	}
+	res.State, res.Plan = status.StateOK, "Go"
+	res.Note = "first-party endpoint; Go subscription usage only (Zen credit balance is not exposed)"
+	if len(limited) > 0 {
+		res.Note += "; rate-limited: " + strings.Join(limited, ", ")
 	}
 	return res
+}
+
+// get fetches the usage document. Transport errors are not rendered, so the
+// key in the request header can never leak through them.
+func (o OpenCode) get(ctx context.Context, key string) ([]byte, int, error) {
+	base := o.baseURL
+	if base == "" {
+		base = opencodeOrigin
+	}
+	ctx, cancel := context.WithTimeout(ctx, httpTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+opencodeUsagePath, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Accept", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	return body, resp.StatusCode, err
 }

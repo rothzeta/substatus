@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
+	"maps"
 	"os"
 	"os/exec"
-	"sort"
+	"slices"
 	"time"
+
+	"github.com/local/substatus/internal/status"
 )
 
 // Codex delegates authentication and quota retrieval to the provider's CLI.
@@ -21,35 +23,34 @@ type Codex struct{}
 
 func (Codex) Name() string { return "Codex" }
 
-func (Codex) Fetch(ctx context.Context) Result {
-	res := Result{
+func (Codex) Fetch(ctx context.Context) status.Provider {
+	res := status.Provider{
 		Source:  "codex app-server: account/rateLimits/read",
-		Quality: QualityCLI,
+		Quality: status.QualityCLI,
 	}
 	binary, err := exec.LookPath("codex")
 	if err != nil {
-		res.State = ResNotInstalled
-		res.Note = "`codex` CLI not found on PATH"
+		res.State, res.Note = status.StateNotInstalled, "`codex` CLI not found on PATH"
 		return res
 	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "app-server")
 	cmd.Env = envWithoutSecrets(os.Environ())
-	cmd.Stderr = io.Discard
+	cmd.Dir = os.TempDir()
 	cmd.WaitDelay = time.Second
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return codexFailure(res, ctx, err)
+		return codexFailure(ctx, res, err)
 	}
 	defer stdin.Close()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return codexFailure(res, ctx, err)
+		return codexFailure(ctx, res, err)
 	}
 	defer stdout.Close()
 	if err := cmd.Start(); err != nil {
-		return codexFailure(res, ctx, err)
+		return codexFailure(ctx, res, err)
 	}
 	defer func() {
 		_ = cmd.Process.Kill()
@@ -63,20 +64,21 @@ func (Codex) Fetch(ctx context.Context) Result {
 	defer stopClosing()
 	scanner := bufio.NewScanner(io.LimitReader(stdout, maxBody+1))
 	scanner.Buffer(make([]byte, 4096), maxBody)
-	rpc := codexRPC{encoder: json.NewEncoder(stdin), scanner: scanner}
+	rpc := &codexRPC{encoder: json.NewEncoder(stdin), scanner: scanner}
+
 	var initialized struct{}
-	err = rpc.call(1, "initialize", map[string]any{
+	err = rpc.call("initialize", map[string]any{
 		"clientInfo": map[string]string{
-			"name": "substatus", "title": "Subscription status", "version": "0.1.0",
+			"name": "substatus", "title": "Subscription status", "version": Version,
 		},
 	}, &initialized)
 	if err != nil {
-		return codexFailure(res, ctx, err)
+		return codexFailure(ctx, res, err)
 	}
 	if err := rpc.encoder.Encode(map[string]any{
 		"method": "initialized", "params": map[string]any{},
 	}); err != nil {
-		return codexFailure(res, ctx, err)
+		return codexFailure(ctx, res, err)
 	}
 	var account struct {
 		Account *struct {
@@ -85,62 +87,65 @@ func (Codex) Fetch(ctx context.Context) Result {
 		} `json:"account"`
 		RequiresOpenaiAuth *bool `json:"requiresOpenaiAuth"`
 	}
-	if err := rpc.call(2, "account/read", map[string]bool{"refreshToken": false}, &account); err != nil {
-		return codexFailure(res, ctx, err)
+	if err := rpc.call("account/read", map[string]bool{"refreshToken": false}, &account); err != nil {
+		return codexFailure(ctx, res, err)
 	}
-	if account.Account == nil && account.RequiresOpenaiAuth != nil && !*account.RequiresOpenaiAuth {
-		res.State = ResUnavailable
+	switch {
+	case account.Account == nil && account.RequiresOpenaiAuth != nil && !*account.RequiresOpenaiAuth:
+		res.State = status.StateUnavailable
 		res.Note = "the active Codex model provider does not use OpenAI sign-in; no ChatGPT subscription quota applies"
 		return res
-	}
-	if account.Account == nil {
-		res.State = ResAuthMissing
+	case account.Account == nil:
+		res.State = status.StateAuthMissing
 		res.Note = "sign in using the official Codex CLI; this app never starts a login"
 		return res
-	}
-	if account.Account.Type == "apiKey" || account.Account.Type == "amazonBedrock" {
-		res.State = ResUnavailable
+	case account.Account.Type == "apiKey" || account.Account.Type == "amazonBedrock":
+		res.State = status.StateUnavailable
 		res.Note = "Codex subscription quotas require ChatGPT-backed sign-in; API billing is separate"
 		return res
 	}
 	res.Plan = cleanCLIText(account.Account.Plan)
 	// The published request has no params; send exactly that shape.
 	var limits codexLimits
-	if err := rpc.call(3, "account/rateLimits/read", nil, &limits); err != nil {
-		return codexFailure(res, ctx, err)
+	if err := rpc.call("account/rateLimits/read", nil, &limits); err != nil {
+		return codexFailure(ctx, res, err)
 	}
 	windows, err := limits.windows()
 	if err != nil {
-		return codexFailure(res, ctx, err)
+		return codexFailure(ctx, res, err)
 	}
-	res.Windows = windows
-	res.State = ResOK
-	res.Note = "current usage from the documented Codex app-server interface"
 	if len(windows) == 0 {
-		res.State = ResUnavailable
+		res.State = status.StateUnavailable
 		res.Note = "Codex returned no quota percentages; check /status in the official CLI"
+		return res
 	}
+	res.State, res.Windows = status.StateOK, windows
+	res.Note = "current usage from the documented Codex app-server interface"
 	return res
 }
 
+// codexRPC is a minimal JSON-RPC client over the app-server's stdio.
 type codexRPC struct {
 	encoder *json.Encoder
 	scanner *bufio.Scanner
+	lastID  int
 }
 
 type codexRPCError struct {
 	Code int `json:"code"`
 }
 
-func (e *codexRPCError) Error() string { return "Codex status request failed" }
+func (e *codexRPCError) Error() string { return fmt.Sprintf("Codex RPC error %d", e.Code) }
 
-func (r *codexRPC) call(id int, method string, params any, out any) error {
+func (r *codexRPC) call(method string, params any, out any) error {
+	r.lastID++
+	id := r.lastID
 	if err := r.encoder.Encode(struct {
 		ID     int    `json:"id"`
 		Method string `json:"method"`
 		Params any    `json:"params,omitempty"`
 	}{id, method, params}); err != nil {
-		return err
+		return fmt.Errorf("send %s: %w", method, err)
 	}
 	for r.scanner.Scan() {
 		var response struct {
@@ -150,39 +155,42 @@ func (r *codexRPC) call(id int, method string, params any, out any) error {
 			Error  *codexRPCError  `json:"error"`
 		}
 		if err := json.Unmarshal(r.scanner.Bytes(), &response); err != nil {
-			return errors.New("invalid Codex JSON")
+			return fmt.Errorf("%s: invalid JSON: %w", method, err)
 		}
 		if response.ID == nil || response.Method != "" {
 			continue // notifications and server requests never complete a request
 		}
 		if *response.ID != id {
-			return errors.New("unexpected Codex response ID")
+			return fmt.Errorf("%s: unexpected response ID %d", method, *response.ID)
 		}
 		if response.Error != nil {
-			return response.Error
+			return fmt.Errorf("%s: %w", method, response.Error)
 		}
 		if len(response.Result) == 0 || string(response.Result) == "null" {
-			return errors.New("missing Codex result")
+			return fmt.Errorf("%s: missing result", method)
 		}
 		return json.Unmarshal(response.Result, out)
 	}
 	if err := r.scanner.Err(); err != nil {
-		return err
+		return fmt.Errorf("%s: %w", method, err)
 	}
-	return errors.New("Codex closed its status stream")
+	return fmt.Errorf("%s: Codex closed its status stream", method)
 }
 
-func codexFailure(res Result, ctx context.Context, err error) Result {
-	res.State, res.Windows = ResError, nil
+// codexFailure maps an internal error to a safe note: subprocess output,
+// account identity and RPC messages are never rendered.
+func codexFailure(ctx context.Context, res status.Provider, err error) status.Provider {
+	res.State, res.Windows = status.StateError, nil
 	res.Note = "Codex status retrieval failed; check the CLI's sign-in, version, and connectivity"
 	var rpcErr *codexRPCError
-	if ctx.Err() != nil {
+	switch {
+	case ctx.Err() != nil:
 		res.Note = "Codex status command timed out or was cancelled"
-	} else if errors.As(err, &rpcErr) && rpcErr.Code == -32601 {
-		res.State = ResUnsupported
+	case errors.As(err, &rpcErr) && rpcErr.Code == -32601:
+		res.State = status.StateUnsupported
 		res.Note = "this Codex CLI version lacks the documented status method; update it or use /status manually"
 	}
-	return res // never render subprocess output, account identity or RPC errors
+	return res
 }
 
 type codexLimits struct {
@@ -202,18 +210,13 @@ type codexWindow struct {
 	Reset   *int64   `json:"resetsAt"`
 }
 
-func (l codexLimits) windows() ([]ResultWindow, error) {
+func (l codexLimits) windows() ([]status.Window, error) {
 	buckets := l.ByID
 	if len(buckets) == 0 {
 		buckets = map[string]*codexLimit{"codex": l.RateLimits}
 	}
-	ids := make([]string, 0, len(buckets))
-	for id := range buckets {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	var out []ResultWindow
-	for _, id := range ids {
+	var out []status.Window
+	for _, id := range slices.Sorted(maps.Keys(buckets)) {
 		bucket := buckets[id]
 		if bucket == nil {
 			continue
@@ -226,19 +229,15 @@ func (l codexLimits) windows() ([]ResultWindow, error) {
 			if w == nil || w.Used == nil {
 				continue
 			}
-			if math.IsNaN(*w.Used) || math.IsInf(*w.Used, 0) || *w.Used < 0 || *w.Used > 100 {
+			if !validPercent(*w.Used, 100) {
 				return nil, errors.New("invalid Codex percentage")
 			}
-			window := "primary"
-			if i == 1 {
-				window = "secondary"
-			}
+			window := [...]string{"primary", "secondary"}[i]
 			if w.Minutes != nil {
 				n := *w.Minutes
-				if n <= 0 {
-					return nil, errors.New("invalid Codex duration")
-				}
 				switch {
+				case n <= 0:
+					return nil, errors.New("invalid Codex duration")
 				case n%1440 == 0:
 					window = fmt.Sprintf("%dd", n/1440)
 				case n%60 == 0:
@@ -247,12 +246,12 @@ func (l codexLimits) windows() ([]ResultWindow, error) {
 					window = fmt.Sprintf("%dm", n)
 				}
 			}
-			item := ResultWindow{Label: label + " " + window, Percent: *w.Used}
+			item := status.Window{Label: label + " " + window, Percent: *w.Used}
 			if w.Reset != nil {
 				if *w.Reset <= 0 {
 					return nil, errors.New("invalid Codex reset")
 				}
-				item.ResetsAt, item.HasReset = time.Unix(*w.Reset, 0), true
+				item.ResetsAt = time.Unix(*w.Reset, 0)
 			}
 			out = append(out, item)
 		}

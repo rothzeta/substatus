@@ -26,7 +26,7 @@ func sample() status.Snapshot {
 			{
 				Name: "Gemini (agy)", State: status.StateOK,
 				Source: "agy /usage CLI", Quality: status.QualityCLI,
-				Windows: []status.Window{{Label: "weekly", Percent: 40, ResetsAt: time.Date(2026, 10, 14, 9, 59, 59, 0, time.UTC), HasReset: true}},
+				Windows: []status.Window{{Label: "weekly", Percent: 40, ResetsAt: time.Date(2026, 10, 14, 9, 59, 59, 0, time.UTC)}},
 			},
 			{
 				Name: "OpenCode", State: status.StateNotInstalled, Note: "missing API key",
