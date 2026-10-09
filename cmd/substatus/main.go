@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/local/substatus/internal/provider"
 	"github.com/local/substatus/internal/runner"
@@ -75,13 +74,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	pal := ui.Palette{Enabled: ui.ColorEnabled(*noColor)}
-	r := runner.New(configuredProviders()...)
-	r.Interval = *refresh
+	r := runner.New(*refresh, configuredProviders()...)
 
 	if *once {
-		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-		defer cancel()
-		ui.RenderOnce(stdout, r.Refresh(ctx), pal)
+		ui.RenderOnce(stdout, r.Refresh(context.Background()), pal)
 		return 0
 	}
 
@@ -93,14 +89,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	restoreInput := tui.Start(ctx)
 	defer restoreInput()
 
-	snaps := r.Watch(ctx)
+	// Fetching happens in the runner, so this loop only draws and stays
+	// responsive to quit keys and resizes while providers are slow.
+	snaps := r.Watch(ctx, tui.Refresh())
 	resizes := ui.ResizeSignals(ctx)
-
-	// The first snapshot draws immediately; later snapshots, manual refresh
-	// requests, and terminal resizes all trigger a redraw. The latest snapshot
-	// is retained so a resize can repaint without re-querying providers.
 	var last status.Snapshot
-	haveSnapshot := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -111,18 +104,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 			if !ok {
 				return 0
 			}
-			last, haveSnapshot = snap, true
-			tui.Draw(snap, *refresh)
-		case <-tui.Refresh():
-			ctx2, cancel2 := context.WithTimeout(ctx, 25*time.Second)
-			snap := r.Refresh(ctx2)
-			cancel2()
-			last, haveSnapshot = snap, true
-			tui.Draw(snap, *refresh)
+			last = snap
+			tui.Draw(last, *refresh)
 		case <-resizes:
-			if haveSnapshot {
-				tui.Draw(last, *refresh)
-			}
+			tui.Draw(last, *refresh)
 		}
 	}
 }
