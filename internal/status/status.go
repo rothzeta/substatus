@@ -4,9 +4,7 @@
 // auth formats, endpoints, and quota semantics into this shared shape.
 package status
 
-import (
-	"time"
-)
+import "time"
 
 // State is the coarse lifecycle state of a provider check. Per-provider errors
 // never mask successful providers: every provider reports exactly one State.

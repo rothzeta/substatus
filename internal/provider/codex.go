@@ -29,9 +29,6 @@ func (c Codex) Fetch(ctx context.Context) status.Provider {
 		Quality: status.QualityCLI,
 	}
 	ctx, cmd, cleanup, err := newCLICommand(ctx, "codex", nil, "app-server")
-	if errors.Is(err, errNotInstalled) {
-		return fail(res, status.StateNotInstalled, "`codex` CLI not found on PATH")
-	}
 	if err != nil {
 		return codexFailure(ctx, res, err)
 	}
@@ -130,7 +127,7 @@ type codexRPCError struct {
 
 func (e *codexRPCError) Error() string { return fmt.Sprintf("Codex RPC error %d", e.Code) }
 
-func (r *codexRPC) call(method string, params any, out any) error {
+func (r *codexRPC) call(method string, params, out any) error {
 	r.lastID++
 	id := r.lastID
 	if err := r.encoder.Encode(struct {
@@ -175,6 +172,8 @@ func (r *codexRPC) call(method string, params any, out any) error {
 func codexFailure(ctx context.Context, res status.Provider, err error) status.Provider {
 	var rpcErr *codexRPCError
 	switch {
+	case errors.Is(err, errNotInstalled):
+		return fail(res, status.StateNotInstalled, "`codex` CLI not found on PATH")
 	case ctx.Err() != nil:
 		return fail(res, status.StateError, "Codex status command timed out or was cancelled")
 	case errors.As(err, &rpcErr) && rpcErr.Code == -32601:

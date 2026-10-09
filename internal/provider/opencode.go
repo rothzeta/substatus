@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -188,11 +187,10 @@ func opencodeKey() string {
 	if err != nil {
 		return ""
 	}
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
-	line, _, _ := bufio.NewReaderSize(io.LimitReader(f, 4096), 4096).ReadLine()
-	return strings.TrimSpace(string(line))
+	line, _, _ := strings.Cut(string(data), "\n")
+	return strings.TrimSpace(line)
 }

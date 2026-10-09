@@ -35,7 +35,7 @@ sha256() {
 
 cleanup() {
 	[ -z "$tmp" ] || rm -rf "$tmp"
-	[ -z "$bin" ] || rm -f "$bin.new"
+	rm -f "$bin.new"
 }
 
 main() {
@@ -45,10 +45,11 @@ main() {
 	need curl
 	need tar
 	tmp=
+	# Exiting from a signal trap runs the EXIT trap.
 	trap cleanup EXIT
-	trap 'cleanup; exit 130' INT
-	trap 'cleanup; exit 143' TERM
-	trap 'cleanup; exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	trap 'exit 129' HUP
 
 	case $(uname -s) in
 	Linux) os=linux ;;
@@ -69,7 +70,7 @@ main() {
 	if [ -z "$version" ]; then
 		# /releases/latest redirects to /releases/tag/<version>.
 		url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest") ||
-			die "could not reach GitHub"
+			die "could not find the latest release on GitHub"
 		version=${url##*/}
 		case $version in
 		v*) ;;
