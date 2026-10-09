@@ -1,0 +1,4 @@
+/substatus
+/dist/
+*.test
+*.out
