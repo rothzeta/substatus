@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/local/substatus/internal/status"
+	"github.com/rothzeta/substatus/internal/status"
 )
 
 // Gemini obtains quota through Antigravity CLI's documented /usage command.

@@ -6,7 +6,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/local/substatus/internal/status"
+	"github.com/rothzeta/substatus/internal/status"
 )
 
 // DefaultInterval is the default time between refresh cycles.

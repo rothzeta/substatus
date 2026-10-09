@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/local/substatus/internal/status"
+	"github.com/rothzeta/substatus/internal/status"
 )
 
 // fakeProvider returns a canned result after release is closed (or at once if

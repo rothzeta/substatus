@@ -17,10 +17,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/local/substatus/internal/provider"
-	"github.com/local/substatus/internal/runner"
-	"github.com/local/substatus/internal/status"
-	"github.com/local/substatus/internal/ui"
+	"github.com/rothzeta/substatus/internal/provider"
+	"github.com/rothzeta/substatus/internal/runner"
+	"github.com/rothzeta/substatus/internal/status"
+	"github.com/rothzeta/substatus/internal/ui"
 )
 
 func main() {

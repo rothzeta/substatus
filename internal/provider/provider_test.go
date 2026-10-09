@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/local/substatus/internal/status"
+	"github.com/rothzeta/substatus/internal/status"
 )
 
 // Output captured from `claude -p /usage --output-format json` (Claude Code

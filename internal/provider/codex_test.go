@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/local/substatus/internal/status"
+	"github.com/rothzeta/substatus/internal/status"
 )
 
 func fakeCLI(t *testing.T, name, script string) {

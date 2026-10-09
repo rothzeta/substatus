@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/local/substatus/internal/status"
+	"github.com/rothzeta/substatus/internal/status"
 )
 
 const (
