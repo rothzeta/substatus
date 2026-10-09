@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,8 +16,8 @@ func sample() status.Snapshot {
 		Providers: []status.Provider{
 			{
 				Name: "Claude", State: status.StateUnavailable,
-				Source: "Claude Code status-line JSON", Quality: status.QualityCLI,
-				Note: "configure status-line bridge",
+				Source: "claude -p /usage", Quality: status.QualityCLI,
+				Note: "no subscription quota",
 			},
 			{
 				Name: "Codex", State: status.StateOK,
@@ -51,7 +52,7 @@ func TestRenderOnceShowsStates(t *testing.T) {
 	var buf bytes.Buffer
 	RenderOnce(&buf, sample(), Palette{Enabled: false})
 	out := buf.String()
-	for _, want := range []string{"ok", "unavailable", "missing", "configure status-line bridge"} {
+	for _, want := range []string{"ok", "unavailable", "missing", "no subscription quota"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n%s", want, out)
 		}
@@ -107,18 +108,36 @@ func TestProgressBarClamps(t *testing.T) {
 
 func TestColorEnabledHonorsNoColorEnv(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
-	if ColorEnabled(false) {
+	if ColorEnabled(false, os.Stdout) {
 		t.Error("NO_COLOR set but color enabled")
 	}
-	if ColorEnabled(true) {
+	if ColorEnabled(true, os.Stdout) {
 		t.Error("explicit flag should disable color")
 	}
 }
 
 func TestUnavailableSourceShowsActionableNote(t *testing.T) {
 	var out bytes.Buffer
-	RenderOnce(&out, status.Snapshot{Providers: []status.Provider{{Name: "Claude", State: status.StateUnavailable, Note: "configure status-line"}}}, Palette{})
-	if !strings.Contains(out.String(), "unavailable Claude") || !strings.Contains(out.String(), "configure status-line") || strings.Contains(out.String(), "unsupported") {
+	RenderOnce(&out, status.Snapshot{Providers: []status.Provider{{Name: "Claude", State: status.StateUnavailable, Note: "no subscription quota"}}}, Palette{})
+	if !strings.Contains(out.String(), "unavailable Claude") || !strings.Contains(out.String(), "no subscription quota") || strings.Contains(out.String(), "unsupported") {
 		t.Fatalf("output = %q", out.String())
+	}
+}
+
+func TestHeaderShowsCheckingAndRefreshing(t *testing.T) {
+	if got := header(status.Snapshot{}, Palette{}); !strings.Contains(got, "checking…") {
+		t.Errorf("before first cycle: %q", got)
+	}
+	snap := sample()
+	snap.Refreshing = true
+	if got := header(snap, Palette{}); !strings.Contains(got, "2026-10-08") || !strings.Contains(got, "refreshing…") {
+		t.Errorf("during refresh: %q", got)
+	}
+}
+
+func TestErrorNoteIsRed(t *testing.T) {
+	got := card(status.Provider{Name: "X", State: status.StateError, Note: "failed"}, Palette{Enabled: true})
+	if !strings.Contains(got, fgRed+"failed") {
+		t.Errorf("card = %q", got)
 	}
 }

@@ -7,6 +7,7 @@ package ui
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 
@@ -48,19 +49,13 @@ func (p Palette) Cyan(s string) string   { return p.wrap(fgCyan, s) }
 func (p Palette) Gray(s string) string   { return p.wrap(fgGray, s) }
 func (p Palette) Blue(s string) string   { return p.wrap(fgBlue, s) }
 
-// ColorEnabled reports whether ANSI color should be used.
-func ColorEnabled(noColorFlag bool) bool {
-	if noColorFlag {
+// ColorEnabled reports whether ANSI color should be used on out.
+func ColorEnabled(noColorFlag bool, out *os.File) bool {
+	if noColorFlag || os.Getenv("NO_COLOR") != "" {
 		return false
 	}
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	fi, err := os.Stdout.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
+	fi, err := out.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
 // RenderOnce writes a plain-text snapshot for scripting (no cursor control).
@@ -131,13 +126,7 @@ func progressBar(percent float64, width int) string {
 	if percent < 0 {
 		return strings.Repeat("░", width)
 	}
-	if percent > 100 {
-		percent = 100
-	}
-	filled := int(percent/100*float64(width) + 0.5)
-	if filled > width {
-		filled = width
-	}
+	filled := int(math.Round(min(percent, 100) / 100 * float64(width)))
 	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 }
 

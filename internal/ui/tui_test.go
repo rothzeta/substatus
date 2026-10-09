@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"context"
 	"io"
 	"os"
 	"testing"
@@ -17,9 +16,7 @@ func TestStartReadsRefreshAndQuitKeys(t *testing.T) {
 	defer writer.Close()
 
 	tui := NewTUI(Options{In: reader, Out: io.Discard})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	restore := tui.Start(ctx)
+	restore := tui.Start()
 	defer restore()
 
 	if _, err := writer.Write([]byte("rq")); err != nil {
