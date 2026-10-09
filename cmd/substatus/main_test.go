@@ -51,8 +51,6 @@ func TestUnknownFlagExitsTwo(t *testing.T) {
 // material is printed, and the process does not crash.
 func TestOnceOutputInSanitizedEnvironment(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("LOCALAPPDATA", t.TempDir())
 	t.Setenv("OPENCODE_API_KEY", "")
 	t.Setenv("NO_COLOR", "1")
 	t.Setenv("PATH", "/nonexistent")
@@ -77,25 +75,5 @@ func TestOnceOutputInSanitizedEnvironment(t *testing.T) {
 	}
 	if strings.Contains(text, "Bearer ") || strings.Contains(text, "sk-") {
 		t.Errorf("output appears to contain credential material:\n%s", text)
-	}
-}
-
-func TestClaudeStatusLineCaptureFlag(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("LOCALAPPDATA", t.TempDir())
-	input := strings.NewReader(`{"rate_limits":{"five_hour":{"used_percentage":20}}}`)
-	var out, errBuf bytes.Buffer
-	if code := runWithInput([]string{"--claude-statusline"}, input, &out, &errBuf); code != 0 {
-		t.Fatalf("exit = %d; stderr = %q", code, errBuf.String())
-	}
-	if !strings.Contains(out.String(), "20%") || strings.Contains(out.String(), "Subscription status") {
-		t.Fatalf("status-line output = %q", out.String())
-	}
-	if code := runWithInput([]string{"--claude-statusline"}, strings.NewReader("not-json-secret"), &out, &errBuf); code != 1 {
-		t.Fatalf("invalid input exit = %d", code)
-	}
-	if strings.Contains(errBuf.String(), "secret") {
-		t.Fatal("status-line error leaked input")
 	}
 }

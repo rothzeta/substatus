@@ -4,221 +4,132 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
-	"io/fs"
-	"math"
-	"os"
-	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/local/substatus/internal/status"
 )
 
-const claudeSnapshotMaxAge = 5 * time.Minute
-
-// Claude reads only substatus's own quota snapshot. Claude Code delivers this
-// data through its documented statusLine command interface; no Claude process,
-// credential file, transcript, token, or private endpoint is accessed here.
+// Claude runs Claude Code's own /usage command in print mode. Claude Code
+// handles /usage locally (no model turn, no quota spent) and authenticates
+// with its own credentials; this app never reads them or calls Anthropic.
 type Claude struct{}
 
 func (Claude) Name() string { return "Claude" }
 
-func ClaudeUsagePath() (string, error) {
-	dir, err := os.UserCacheDir()
-	if err != nil {
-		return "", errors.New("could not locate substatus cache directory")
-	}
-	return filepath.Join(dir, "substatus", "claude-usage.json"), nil
-}
-
 func (Claude) Fetch(ctx context.Context) status.Provider {
 	res := status.Provider{
-		Source:  "Claude Code status-line JSON (local snapshot)",
+		Source:  "claude -p /usage --output-format json",
 		Quality: status.QualityCLI,
 	}
-	if ctx.Err() != nil {
-		res.State = status.StateError
-		res.Note = "Claude status check cancelled"
+	// Claude Code's own credential variables stay; other secrets are scrubbed.
+	keep := []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
+	out, err := runCLI(ctx, "claude", keep, "-p", "/usage", "--output-format", "json", "--no-session-persistence")
+	switch {
+	case errors.Is(err, errNotInstalled):
+		res.State, res.Note = status.StateNotInstalled, "`claude` CLI not found on PATH"
+		return res
+	case errors.Is(err, errOutputLimit):
+		res.State, res.Note = status.StateError, "claude /usage output exceeded the 1 MiB safety limit"
+		return res
+	case ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded):
+		res.State, res.Note = status.StateError, "claude /usage command timed out or was cancelled"
+		return res
+	case err != nil:
+		res.State, res.Note = status.StateError, "claude /usage command failed; check sign-in with `claude auth`"
 		return res
 	}
-	path, err := ClaudeUsagePath()
-	if err != nil {
-		res.State = status.StateError
-		res.Note = err.Error()
+
+	var result struct {
+		Type         string `json:"type"`
+		Subtype      string `json:"subtype"`
+		IsError      bool   `json:"is_error"`
+		NumTurns     int    `json:"num_turns"`
+		LocalCommand string `json:"local_command"`
+		Result       string `json:"result"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil || result.Type != "result" {
+		res.State, res.Note = status.StateError, "could not parse claude /usage JSON output"
 		return res
 	}
-	file, err := os.Open(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		res.State = status.StateUnavailable
-		res.Note = "setup required: configure Claude Code's status-line command as substatus --claude-statusline (see README); no credentials are read"
+	// A model turn means this CLI version sent /usage to the model as a prompt.
+	if result.LocalCommand != "usage" || result.NumTurns != 0 {
+		res.State, res.Note = status.StateUnsupported, "this Claude Code version does not run /usage locally in print mode; update it"
 		return res
 	}
-	if err != nil {
-		res.State = status.StateError
-		res.Note = "could not read substatus's Claude quota snapshot"
+	if result.IsError || result.Subtype != "success" {
+		res.State, res.Note = status.StateError, "claude /usage did not succeed; check sign-in with `claude auth`"
 		return res
 	}
-	defer file.Close()
-	data, err := readBounded(file)
-	var snapshot claudeSnapshot
-	if err != nil || json.Unmarshal(data, &snapshot) != nil {
-		res.State = status.StateError
-		res.Note = "could not parse substatus's Claude quota snapshot"
-		return res
-	}
-	now := time.Now()
-	if snapshot.CapturedAt.IsZero() || now.Sub(snapshot.CapturedAt) > claudeSnapshotMaxAge || snapshot.CapturedAt.Sub(now) > time.Minute {
-		res.State = status.StateUnavailable
-		res.Note = "Claude status-line snapshot is stale; refresh it from an active Claude Code session"
-		return res
-	}
-	windows, err := snapshot.RateLimits.windows(now)
-	if err != nil {
-		res.State = status.StateError
-		res.Note = "Claude status-line snapshot contains invalid quota data"
+	windows := parseClaudeUsage(result.Result, time.Now())
+	if len(windows) == 0 {
+		res.State, res.Note = status.StateUnavailable, "claude /usage reported no subscription quota; API-key billing has none"
 		return res
 	}
 	res.State, res.Windows = status.StateOK, windows
-	res.Note = "Claude Code status-line snapshot written " + snapshot.CapturedAt.UTC().Format(time.RFC3339) + "; values are from that session's latest API response, not polled by this app"
-	if len(windows) == 0 {
-		res.State = status.StateUnavailable
-		res.Note = "Claude Code supplied no current rate_limits; fields depend on plan/version and appear after a session response"
-	}
+	res.Note = "live usage from Claude Code's /usage command"
 	return res
 }
 
-type claudeWindow struct {
-	Used  *float64 `json:"used_percentage,omitempty"`
-	Reset *int64   `json:"resets_at,omitempty"`
-}
+// claudeUsageLine matches "Current week (all models): 37% used · resets Oct 14, 10am (UTC)".
+var claudeUsageLine = regexp.MustCompile(`^(.+?):\s+(\d+(?:\.\d+)?)%\s+used(?:\s+·\s+resets\s+(.+))?$`)
 
-type claudeRateLimits struct {
-	FiveHour *claudeWindow `json:"five_hour,omitempty"`
-	SevenDay *claudeWindow `json:"seven_day,omitempty"`
-	Spend    *claudeWindow `json:"spend_limit,omitempty"`
-}
-
-type claudeSnapshot struct {
-	CapturedAt time.Time        `json:"captured_at"`
-	RateLimits claudeRateLimits `json:"rate_limits"`
-}
-
-func (r claudeRateLimits) windows(now time.Time) ([]status.Window, error) {
+// parseClaudeUsage extracts quota windows from /usage text. The text is meant
+// for people, so a line that does not match is skipped and an unparseable
+// reset leaves the reset unknown; neither fabricates a value.
+func parseClaudeUsage(text string, now time.Time) []status.Window {
 	var out []status.Window
-	for _, item := range []struct {
-		label  string
-		window *claudeWindow
-		limit  float64
-	}{
-		{"5h", r.FiveHour, 100},
-		{"7d", r.SevenDay, 100},
-		// Documented to exceed 100 once a gateway spend limit is passed.
-		{"spend limit", r.Spend, math.Inf(1)},
-	} {
-		w := item.window
-		if w == nil || w.Used == nil {
+	for _, line := range strings.Split(text, "\n") {
+		m := claudeUsageLine.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
 			continue
 		}
-		if !validPercent(*w.Used, item.limit) {
-			return nil, errors.New("invalid Claude percentage")
+		percent, err := strconv.ParseFloat(m[2], 64)
+		if err != nil || !validPercent(percent, 100) {
+			continue
 		}
-		window := status.Window{Label: item.label, Percent: *w.Used}
-		if w.Reset != nil {
-			if *w.Reset <= 0 {
-				return nil, errors.New("invalid Claude reset")
-			}
-			window.ResetsAt = time.Unix(*w.Reset, 0)
-			if !window.ResetsAt.After(now) {
-				continue // never invent a reset or zero usage
-			}
-		}
-		out = append(out, window)
+		label := cleanCLIText(strings.TrimPrefix(m[1], "Current "))
+		out = append(out, status.Window{Label: label, Percent: percent, ResetsAt: parseClaudeReset(m[3], now)})
 	}
-	return out, nil
+	return out
 }
 
-// SaveClaudeStatusLine accepts provider-owned stdin, retaining only documented
-// quota fields and capture time. It never saves session identity or credentials.
-// A snapshot with no quotas replaces the old one so vanished fields cannot linger.
-func SaveClaudeStatusLine(input io.Reader, path string, now time.Time) error {
-	data, err := readBounded(input)
+// parseClaudeReset parses "Oct 14, 10am (UTC)" or "1:50pm (Europe/Paris)".
+// The year and, for time-only values, the date are the next ones after now.
+func parseClaudeReset(s string, now time.Time) time.Time {
+	value, zone, ok := strings.Cut(strings.TrimSuffix(strings.TrimSpace(s), ")"), " (")
+	if !ok {
+		return time.Time{}
+	}
+	loc, err := time.LoadLocation(zone)
 	if err != nil {
-		return err
+		return time.Time{}
 	}
-	var payload *struct {
-		RateLimits claudeRateLimits `json:"rate_limits"`
+	now = now.In(loc)
+	for _, layout := range []string{"Jan 2, 2006, 3:04pm", "Jan 2, 2006, 3pm"} {
+		if t, err := time.ParseInLocation(layout, value, loc); err == nil {
+			return t
+		}
 	}
-	if json.Unmarshal(data, &payload) != nil || payload == nil {
-		return errors.New("invalid Claude status-line JSON")
-	}
-	if _, err := payload.RateLimits.windows(now); err != nil {
-		return err
-	}
-	snapshot := claudeSnapshot{CapturedAt: now.UTC(), RateLimits: payload.RateLimits}
-	data, err = json.Marshal(snapshot)
-	if err != nil {
-		return errors.New("could not encode Claude quota snapshot")
-	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return errors.New("could not create substatus cache directory")
-	}
-	file, err := os.CreateTemp(dir, ".claude-usage-*.json")
-	if err != nil {
-		return errors.New("could not create Claude quota snapshot")
-	}
-	name := file.Name()
-	defer os.Remove(name)
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		return errors.New("could not write Claude quota snapshot")
-	}
-	if err := file.Close(); err != nil {
-		return errors.New("could not close Claude quota snapshot")
-	}
-	if err := os.Rename(name, path); err != nil {
-		return errors.New("could not replace Claude quota snapshot")
-	}
-	return nil
-}
-
-// ClaudeStatusLine stores the provider payload and prints a compact local line.
-// It is separate from Fetch: invoking this mode never queries other providers.
-func ClaudeStatusLine(input io.Reader, output io.Writer) error {
-	path, err := ClaudeUsagePath()
-	if err != nil {
-		return err
-	}
-	if err := SaveClaudeStatusLine(input, path, time.Now()); err != nil {
-		return err
-	}
-	res := (Claude{}).Fetch(context.Background())
-	if res.State == status.StateError {
-		return errors.New("could not read Claude quota snapshot")
-	}
-	if len(res.Windows) == 0 {
-		_, err = fmt.Fprintln(output, "Claude quota unavailable")
-		return err
-	}
-	for i, w := range res.Windows {
-		if i > 0 {
-			if _, err := fmt.Fprint(output, " | "); err != nil {
-				return err
+	for _, layout := range []string{"Jan 2, 3:04pm", "Jan 2, 3pm"} {
+		if t, err := time.ParseInLocation(layout, value, loc); err == nil {
+			t = t.AddDate(now.Year()-t.Year(), 0, 0)
+			if t.Before(now.Add(-24 * time.Hour)) {
+				t = t.AddDate(1, 0, 0)
 			}
-		}
-		if _, err := fmt.Fprintf(output, "%s: %g%% used", w.Label, w.Percent); err != nil {
-			return err
+			return t
 		}
 	}
-	_, err = fmt.Fprintln(output)
-	return err
-}
-
-func readBounded(r io.Reader) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, maxBody+1))
-	if err != nil || len(data) > maxBody {
-		return nil, errors.New("quota input exceeds limit or cannot be read")
+	for _, layout := range []string{"3:04pm", "3pm"} {
+		if t, err := time.ParseInLocation(layout, value, loc); err == nil {
+			t = time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, loc)
+			if t.Before(now) {
+				t = t.AddDate(0, 0, 1)
+			}
+			return t
+		}
 	}
-	return data, nil
+	return time.Time{}
 }
