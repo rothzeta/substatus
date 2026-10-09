@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/local/substatus/internal/status"
 )
 
 const claudeSnapshotMaxAge = 5 * time.Minute
@@ -29,30 +32,30 @@ func ClaudeUsagePath() (string, error) {
 	return filepath.Join(dir, "substatus", "claude-usage.json"), nil
 }
 
-func (Claude) Fetch(ctx context.Context) Result {
-	res := Result{
+func (Claude) Fetch(ctx context.Context) status.Provider {
+	res := status.Provider{
 		Source:  "Claude Code status-line JSON (local snapshot)",
-		Quality: QualityCLI,
+		Quality: status.QualityCLI,
 	}
 	if ctx.Err() != nil {
-		res.State = ResError
+		res.State = status.StateError
 		res.Note = "Claude status check cancelled"
 		return res
 	}
 	path, err := ClaudeUsagePath()
 	if err != nil {
-		res.State = ResError
+		res.State = status.StateError
 		res.Note = err.Error()
 		return res
 	}
 	file, err := os.Open(path)
-	if os.IsNotExist(err) {
-		res.State = ResUnavailable
+	if errors.Is(err, fs.ErrNotExist) {
+		res.State = status.StateUnavailable
 		res.Note = "setup required: configure Claude Code's status-line command as substatus --claude-statusline (see README); no credentials are read"
 		return res
 	}
 	if err != nil {
-		res.State = ResError
+		res.State = status.StateError
 		res.Note = "could not read substatus's Claude quota snapshot"
 		return res
 	}
@@ -60,26 +63,26 @@ func (Claude) Fetch(ctx context.Context) Result {
 	data, err := readBounded(file)
 	var snapshot claudeSnapshot
 	if err != nil || json.Unmarshal(data, &snapshot) != nil {
-		res.State = ResError
+		res.State = status.StateError
 		res.Note = "could not parse substatus's Claude quota snapshot"
 		return res
 	}
 	now := time.Now()
 	if snapshot.CapturedAt.IsZero() || now.Sub(snapshot.CapturedAt) > claudeSnapshotMaxAge || snapshot.CapturedAt.Sub(now) > time.Minute {
-		res.State = ResUnavailable
+		res.State = status.StateUnavailable
 		res.Note = "Claude status-line snapshot is stale; refresh it from an active Claude Code session"
 		return res
 	}
 	windows, err := snapshot.RateLimits.windows(now)
 	if err != nil {
-		res.State = ResError
+		res.State = status.StateError
 		res.Note = "Claude status-line snapshot contains invalid quota data"
 		return res
 	}
-	res.State, res.Windows = ResOK, windows
+	res.State, res.Windows = status.StateOK, windows
 	res.Note = "Claude Code status-line snapshot written " + snapshot.CapturedAt.UTC().Format(time.RFC3339) + "; values are from that session's latest API response, not polled by this app"
 	if len(windows) == 0 {
-		res.State = ResUnavailable
+		res.State = status.StateUnavailable
 		res.Note = "Claude Code supplied no current rate_limits; fields depend on plan/version and appear after a session response"
 	}
 	return res
@@ -101,8 +104,8 @@ type claudeSnapshot struct {
 	RateLimits claudeRateLimits `json:"rate_limits"`
 }
 
-func (r claudeRateLimits) windows(now time.Time) ([]ResultWindow, error) {
-	var out []ResultWindow
+func (r claudeRateLimits) windows(now time.Time) ([]status.Window, error) {
+	var out []status.Window
 	for _, item := range []struct {
 		label  string
 		window *claudeWindow
@@ -117,10 +120,10 @@ func (r claudeRateLimits) windows(now time.Time) ([]ResultWindow, error) {
 		if w == nil || w.Used == nil {
 			continue
 		}
-		if math.IsNaN(*w.Used) || math.IsInf(*w.Used, 0) || *w.Used < 0 || *w.Used > item.limit {
+		if !validPercent(*w.Used, item.limit) {
 			return nil, errors.New("invalid Claude percentage")
 		}
-		window := ResultWindow{Label: item.label, Percent: *w.Used}
+		window := status.Window{Label: item.label, Percent: *w.Used}
 		if w.Reset != nil {
 			if *w.Reset <= 0 {
 				return nil, errors.New("invalid Claude reset")
@@ -129,7 +132,6 @@ func (r claudeRateLimits) windows(now time.Time) ([]ResultWindow, error) {
 			if !window.ResetsAt.After(now) {
 				continue // never invent a reset or zero usage
 			}
-			window.HasReset = true
 		}
 		out = append(out, window)
 	}
@@ -192,7 +194,7 @@ func ClaudeStatusLine(input io.Reader, output io.Writer) error {
 		return err
 	}
 	res := (Claude{}).Fetch(context.Background())
-	if res.State == ResError {
+	if res.State == status.StateError {
 		return errors.New("could not read Claude quota snapshot")
 	}
 	if len(res.Windows) == 0 {

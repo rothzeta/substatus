@@ -90,16 +90,15 @@ func card(p status.Provider, pal Palette) string {
 	b.WriteString("\n")
 	b.WriteString("    " + pal.Dim("source: "+srcLine(p)) + "\n")
 
-	if len(p.Windows) > 0 {
-		for _, wnd := range p.Windows {
-			b.WriteString("    " + windowLine(wnd, pal) + "\n")
-		}
-	}
-	if p.Err != "" {
-		b.WriteString("    " + pal.Red(p.Err) + "\n")
+	for _, wnd := range p.Windows {
+		b.WriteString("    " + windowLine(wnd, pal) + "\n")
 	}
 	if p.Note != "" {
-		b.WriteString("    " + pal.Gray(p.Note) + "\n")
+		note := pal.Gray
+		if p.State == status.StateError {
+			note = pal.Red
+		}
+		b.WriteString("    " + note(p.Note) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -116,7 +115,7 @@ func windowLine(w status.Window, pal Palette) string {
 	bar := progressBar(w.Percent, 20)
 	pct := status.FormatPercent(w.Percent)
 	line := name + " " + colorByPercent(bar, w.Percent, pal) + " " + pct
-	if w.HasReset && !w.ResetsAt.IsZero() {
+	if !w.ResetsAt.IsZero() {
 		line += "  " + pal.Dim("resets "+w.ResetsAt.Local().Format("15:04 Jan 2"))
 	}
 	return line

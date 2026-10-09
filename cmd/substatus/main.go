@@ -24,20 +24,18 @@ import (
 	"github.com/local/substatus/internal/ui"
 )
 
-const version = "0.1.0"
-
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 // configuredProviders builds the provider set using supported CLI interfaces
 // and the owner's requested direct OpenCode API-key integration.
-func configuredProviders() []provider.Provider {
-	return []provider.Provider{
-		&provider.Codex{},
-		&provider.Claude{},
-		&provider.Gemini{},
-		&provider.OpenCode{},
+func configuredProviders() []runner.Provider {
+	return []runner.Provider{
+		provider.Claude{},
+		provider.Codex{},
+		provider.Gemini{},
+		provider.OpenCode{},
 	}
 }
 
@@ -74,7 +72,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return 2
 	}
 	if *showVer {
-		fmt.Fprintln(stdout, "substatus", version)
+		fmt.Fprintln(stdout, "substatus", provider.Version)
 		return 0
 	}
 	if *claudeStatusLine {

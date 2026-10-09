@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/local/substatus/internal/status"
 )
 
 func TestOpenCodeFetchesGoUsageFromFirstPartyAPI(t *testing.T) {
@@ -28,17 +30,17 @@ func TestOpenCodeFetchesGoUsageFromFirstPartyAPI(t *testing.T) {
 	}))
 	defer server.Close()
 
-	got := (&OpenCode{BaseURL: server.URL}).Fetch(context.Background())
-	if got.State != ResOK {
-		t.Fatalf("state = %v, err = %v, note = %q", got.State, got.Err, got.Note)
+	got := (OpenCode{baseURL: server.URL}).Fetch(context.Background())
+	if got.State != status.StateOK {
+		t.Fatalf("state = %v, note = %q", got.State, got.Note)
 	}
-	if !strings.Contains(got.Source, opencodeUsagePath) || got.Quality != QualityPrivate {
+	if !strings.Contains(got.Source, opencodeUsagePath) || got.Quality != status.QualityPrivate {
 		t.Errorf("source/quality = %q/%v", got.Source, got.Quality)
 	}
 	if len(got.Windows) != 3 {
 		t.Fatalf("windows = %d, want 3: %+v", len(got.Windows), got.Windows)
 	}
-	if got.Windows[0].Label != "rolling" || got.Windows[0].Percent != 17.5 || !got.Windows[0].HasReset || !got.Windows[0].ResetsAt.Equal(reset) {
+	if got.Windows[0].Label != "rolling" || got.Windows[0].Percent != 17.5 || got.Windows[0].ResetsAt.IsZero() || !got.Windows[0].ResetsAt.Equal(reset) {
 		t.Errorf("rolling window = %+v", got.Windows[0])
 	}
 	if got.Windows[2].Percent != 100 {
@@ -52,11 +54,11 @@ func TestOpenCodeWithoutAPIKeyDoesNotMakeRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
 	defer server.Close()
 
-	got := (&OpenCode{BaseURL: server.URL}).Fetch(context.Background())
+	got := (OpenCode{baseURL: server.URL}).Fetch(context.Background())
 	if called {
 		t.Fatal("made request without an API key")
 	}
-	if got.State != ResAuthMissing || got.Note == "" {
+	if got.State != status.StateAuthMissing || got.Note == "" {
 		t.Errorf("result = %+v, want auth-missing with guidance", got)
 	}
 }
@@ -69,12 +71,12 @@ func TestOpenCodeUnauthorizedDoesNotExposeResponseBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	got := (&OpenCode{BaseURL: server.URL}).Fetch(context.Background())
-	if got.State != ResAuthMissing {
+	got := (OpenCode{baseURL: server.URL}).Fetch(context.Background())
+	if got.State != status.StateAuthMissing {
 		t.Fatalf("state = %v, want auth missing", got.State)
 	}
-	if got.Err != nil || got.Note == "" {
-		t.Fatalf("want safe note and no error body, got err=%v note=%q", got.Err, got.Note)
+	if got.Note == "" {
+		t.Fatalf("want a safe note, got %q", got.Note)
 	}
 	if strings.Contains(got.Note, "private-key-value") || strings.Contains(got.Note, "invalid") {
 		t.Errorf("note leaked response body: %q", got.Note)
@@ -89,12 +91,12 @@ func TestOpenCodeWithoutGoEntitlementIsUnsupported(t *testing.T) {
 	}))
 	defer server.Close()
 
-	got := (&OpenCode{BaseURL: server.URL}).Fetch(context.Background())
-	if got.State != ResUnsupported {
+	got := (OpenCode{baseURL: server.URL}).Fetch(context.Background())
+	if got.State != status.StateUnsupported {
 		t.Fatalf("state = %v, want unsupported", got.State)
 	}
-	if got.Err != nil || got.Note == "" {
-		t.Fatalf("want a safe note without body, got err=%v note=%q", got.Err, got.Note)
+	if got.Note == "" {
+		t.Fatalf("want a safe note, got %q", got.Note)
 	}
 }
 
@@ -103,8 +105,8 @@ func TestOpenCodeMalformedUsageIsError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{`) }))
 	defer server.Close()
 
-	got := (&OpenCode{BaseURL: server.URL}).Fetch(context.Background())
-	if got.State != ResError || got.Err == nil {
+	got := (OpenCode{baseURL: server.URL}).Fetch(context.Background())
+	if got.State != status.StateError || got.Note == "" {
 		t.Fatalf("result = %+v, want decode error", got)
 	}
 }

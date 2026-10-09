@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/local/substatus/internal/status"
 )
 
 func TestClaudeUsesOnlyStatusLineOutput(t *testing.T) {
@@ -15,7 +17,7 @@ func TestClaudeUsesOnlyStatusLineOutput(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 	got := (Claude{}).Fetch(context.Background())
-	if got.State != ResUnavailable || len(got.Windows) != 0 || !strings.Contains(got.Note, "status-line") {
+	if got.State != status.StateUnavailable || len(got.Windows) != 0 || !strings.Contains(got.Note, "status-line") {
 		t.Fatalf("got %+v", got)
 	}
 	path, err := ClaudeUsagePath()
@@ -38,7 +40,7 @@ func TestClaudeUsesOnlyStatusLineOutput(t *testing.T) {
 		t.Fatalf("cache permissions: %v, %v", fi, err)
 	}
 	got = (Claude{}).Fetch(context.Background())
-	if got.State != ResOK || got.Quality != QualityCLI || len(got.Windows) != 2 {
+	if got.State != status.StateOK || got.Quality != status.QualityCLI || len(got.Windows) != 2 {
 		t.Fatalf("got %+v", got)
 	}
 	if got.Windows[0].Label != "5h" || got.Windows[0].Percent != 23.5 || got.Windows[0].ResetsAt.Unix() != 1893456000 {
@@ -57,16 +59,16 @@ func TestClaudeDoesNotUseStaleOrExpiredQuotas(t *testing.T) {
 	for _, tc := range []struct {
 		input   string
 		at      time.Time
-		state   ResultState
+		state   status.State
 		windows int
 	}{
-		{`{"rate_limits":{"five_hour":{"used_percentage":0}}}`, time.Now(), ResOK, 1},
-		{`{"rate_limits":{"five_hour":{"used_percentage":null}}}`, time.Now(), ResUnavailable, 0},
-		{`{"context_window":{"used_percentage":70}}`, time.Now(), ResUnavailable, 0},
-		{`{"rate_limits":{"five_hour":{"used_percentage":40}}}`, time.Now().Add(-10 * time.Minute), ResUnavailable, 0},
-		{`{"rate_limits":{"five_hour":{"used_percentage":40,"resets_at":1}}}`, time.Now(), ResUnavailable, 0},
+		{`{"rate_limits":{"five_hour":{"used_percentage":0}}}`, time.Now(), status.StateOK, 1},
+		{`{"rate_limits":{"five_hour":{"used_percentage":null}}}`, time.Now(), status.StateUnavailable, 0},
+		{`{"context_window":{"used_percentage":70}}`, time.Now(), status.StateUnavailable, 0},
+		{`{"rate_limits":{"five_hour":{"used_percentage":40}}}`, time.Now().Add(-10 * time.Minute), status.StateUnavailable, 0},
+		{`{"rate_limits":{"five_hour":{"used_percentage":40,"resets_at":1}}}`, time.Now(), status.StateUnavailable, 0},
 		// spend_limit is documented to exceed 100 once the limit is passed.
-		{`{"rate_limits":{"spend_limit":{"used_percentage":112.5,"resets_at":1893456000,"used_usd":562.5,"limit_usd":500,"period":"monthly"}}}`, time.Now(), ResOK, 1},
+		{`{"rate_limits":{"spend_limit":{"used_percentage":112.5,"resets_at":1893456000,"used_usd":562.5,"limit_usd":500,"period":"monthly"}}}`, time.Now(), status.StateOK, 1},
 	} {
 		if err := SaveClaudeStatusLine(strings.NewReader(tc.input), path, tc.at); err != nil {
 			t.Fatal(err)

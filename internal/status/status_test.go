@@ -1,9 +1,6 @@
 package status
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 func TestFormatPercent(t *testing.T) {
 	tests := []struct {
@@ -17,6 +14,7 @@ func TestFormatPercent(t *testing.T) {
 		{29.1208, "29.12%"},
 		{99.996, "100%"},
 		{100, "100%"},
+		{112.5, "112.5%"},
 		{-1, "?"},
 		{-0.5, "?"},
 	}
@@ -38,24 +36,13 @@ func TestWindowKnown(t *testing.T) {
 
 func TestSourceQualityStrings(t *testing.T) {
 	cases := map[SourceQuality]string{
-		QualityOfficial:   "official",
 		QualityPrivate:    "first-party (private endpoint)",
 		QualityCLI:        "provider CLI",
-		QualityReverse:    "reverse-engineered",
 		SourceQuality(99): "unknown",
 	}
 	for q, want := range cases {
 		if got := q.String(); got != want {
 			t.Errorf("SourceQuality(%d).String() = %q, want %q", q, got, want)
 		}
-	}
-}
-
-func TestSnapshotSortStableByName(t *testing.T) {
-	s := Snapshot{Providers: []Provider{{Name: "OpenCode"}, {Name: "Claude"}, {Name: "Codex"}, {Name: "Gemini"}}}
-	s.Sort()
-	got := strings.Join([]string{s.Providers[0].Name, s.Providers[1].Name, s.Providers[2].Name, s.Providers[3].Name}, ",")
-	if got != "Claude,Codex,Gemini,OpenCode" {
-		t.Fatalf("sorted order = %q", got)
 	}
 }

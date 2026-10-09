@@ -1,147 +1,106 @@
 // Package provider implements per-provider usage sources.
 //
-// Every provider is read-only. Gemini delegates quota retrieval to Antigravity's
-// CLI; OpenCode uses its first-party API key. Codex uses its documented
-// app-server protocol; Claude consumes documented status-line output.
+// Every provider is read-only and returns a status.Provider without its Name,
+// which the runner fills in. Codex uses its documented app-server protocol,
+// Claude and Gemini their CLIs' /usage commands, and OpenCode its first-party
+// API key.
 package provider
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"io"
-	"net/http"
+	"math"
+	"os"
+	"os/exec"
+	"slices"
 	"strings"
 	"time"
+	"unicode"
 )
 
-// maxBody bounds every response body we read.
+// Version identifies substatus to provider protocols that ask for a client version.
+const Version = "0.1.0"
+
+// maxBody bounds every response body or CLI output we read.
 const maxBody = 1 << 20 // 1 MiB
 
-// defaultTimeout bounds a single HTTP request.
-const defaultTimeout = 10 * time.Second
+// cliTimeout bounds a single provider CLI invocation.
+const cliTimeout = 25 * time.Second
 
-// Provider reports one provider's status.
-type Provider interface {
-	Name() string
-	Fetch(ctx context.Context) Result
-}
-
-// Result is the internal provider return before conversion to status.Provider.
-// Kept separate so providers never construct UI concerns.
-type Result struct {
-	State   ResultState
-	Plan    string
-	Windows []ResultWindow
-	Note    string
-	Source  string
-	Quality Quality
-	Err     error
-}
-
-// ResultState mirrors status.State without importing the ui layer.
-type ResultState int
-
-const (
-	ResOK ResultState = iota
-	ResAuthMissing
-	ResNotInstalled
-	ResUnsupported
-	ResError
-	// ResUnavailable means the supported source has no current quota data.
-	ResUnavailable
+var (
+	errNotInstalled = errors.New("CLI not found on PATH")
+	errOutputLimit  = errors.New("command output exceeds limit")
 )
 
-// Quality mirrors status.SourceQuality.
-type Quality int
-
-const (
-	QualityOfficial Quality = iota
-	QualityPrivate
-	QualityCLI
-	QualityReverse
-)
-
-// ResultWindow is a single usage window.
-type ResultWindow struct {
-	Label    string
-	Percent  float64 // used percent in [0,100]; -1 unknown
-	ResetsAt time.Time
-	HasReset bool
+// validPercent reports whether p is a finite percentage in [0, max].
+func validPercent(p, max float64) bool {
+	return !math.IsNaN(p) && !math.IsInf(p, 0) && p >= 0 && p <= max
 }
 
-// httpClient is shared across providers; each call uses a bounded context.
-var httpClient = &http.Client{Timeout: defaultTimeout}
-
-// doJSON issues a bounded GET/POST with the given bearer token and headers and
-// returns the response body. Errors are redacted: they never include request
-// headers or credential material.
-func doJSON(ctx context.Context, method, url, bearer string, headers map[string]string, body io.Reader) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+// runCLI runs a provider CLI with a bounded deadline and output, a scrubbed
+// environment that keeps only the named credential variables, and a neutral
+// working directory so no project configuration is picked up. Stderr is
+// discarded: it is never rendered.
+func runCLI(ctx context.Context, name string, keepEnv []string, args ...string) ([]byte, error) {
+	binary, err := exec.LookPath(name)
 	if err != nil {
-		return nil, 0, fmt.Errorf("build request: %w", err)
+		return nil, errNotInstalled
 	}
-	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
-	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, 0, redactError(err)
-	}
-	defer resp.Body.Close()
-	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
-	if err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("read response: %w", err)
-	}
-	return buf, resp.StatusCode, nil
-}
-
-// redactError strips anything that looks like a bearer token or long opaque
-// credential from a transport error string.
-func redactError(err error) error {
-	if err == nil {
-		return nil
-	}
-	msg := err.Error()
-	if strings.Contains(msg, "Authorization") {
-		msg = "request failed (transport error)"
-	}
-	return errors.New(sanitize(msg))
-}
-
-// sanitize removes obvious credential material from arbitrary strings so error
-// text is safe to render. It collapses any "Bearer <token>" and any JWT-looking
-// or long opaque base64url token.
-func sanitize(s string) string {
-	s = replaceBearer(s)
-	return s
-}
-
-// replaceBearer rewrites "Bearer <token>" sequences.
-func replaceBearer(s string) string {
-	const marker = "Bearer "
-	var b strings.Builder
-	for {
-		i := strings.Index(s, marker)
-		if i < 0 {
-			b.WriteString(s)
-			return b.String()
+	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Env = envWithoutSecrets(os.Environ(), keepEnv...)
+	cmd.Dir = os.TempDir()
+	cmd.WaitDelay = time.Second
+	var stdout cappedBuffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		b.WriteString(s[:i])
-		b.WriteString(marker)
-		b.WriteString("<redacted>")
-		j := i + len(marker)
-		for j < len(s) && s[j] != ' ' && s[j] != '\n' && s[j] != '"' && s[j] != '\'' {
-			j++
-		}
-		s = s[j:]
+		return nil, err
 	}
+	return stdout.Bytes(), nil
 }
 
-// trimSlash removes trailing slashes from a base URL.
-func trimSlash(s string) string {
-	return strings.TrimRight(s, "/")
+type cappedBuffer struct {
+	bytes.Buffer
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if b.Len()+len(p) > maxBody {
+		return 0, errOutputLimit
+	}
+	return b.Buffer.Write(p)
+}
+
+// envWithoutSecrets drops credential-looking variables, except those named in
+// keep, so one provider's secrets never reach another provider's CLI.
+func envWithoutSecrets(env []string, keep ...string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		upper := strings.ToUpper(key)
+		secret := strings.HasSuffix(upper, "_API_KEY") || strings.Contains(upper, "OAUTH_TOKEN") ||
+			strings.HasSuffix(upper, "_ACCESS_TOKEN") || strings.HasSuffix(upper, "_CLIENT_SECRET") ||
+			strings.HasSuffix(upper, "_PASSWORD")
+		if secret && !slices.Contains(keep, key) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func cleanCLIText(s string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s))
 }
