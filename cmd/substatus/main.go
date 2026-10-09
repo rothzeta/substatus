@@ -1,10 +1,10 @@
 // Command substatus shows colored subscription/quota status for Codex, Claude,
 // Gemini (via the local `agy` CLI), and OpenCode.
 //
-// It is read-only: Gemini usage comes from `agy`'s `/usage` command and OpenCode
-// usage from its first-party API. Codex uses documented app-server status
-// methods; Claude reads a quota-only snapshot from its status-line interface.
-// It never runs model prompts to measure status or reads provider credential files.
+// It is read-only: Claude and Gemini usage come from their CLIs' local /usage
+// commands, Codex from documented app-server status methods, and OpenCode from
+// its first-party API. It never runs model prompts to measure status or reads
+// provider credential files.
 package main
 
 import (
@@ -28,8 +28,7 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// configuredProviders builds the provider set using supported CLI interfaces
-// and the owner's requested direct OpenCode API-key integration.
+// configuredProviders lists the providers in display order.
 func configuredProviders() []runner.Provider {
 	return []runner.Provider{
 		provider.Claude{},
@@ -42,19 +41,14 @@ func configuredProviders() []runner.Provider {
 // run is the whole program except process exit, so tests can exercise the CLI
 // without spawning a process.
 func run(args []string, stdout, stderr io.Writer) int {
-	return runWithInput(args, os.Stdin, stdout, stderr)
-}
-
-func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("substatus", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
 	var (
-		refresh          = fs.Duration("refresh", runner.DefaultInterval, "interval between automatic refreshes (e.g. 30s, 2m)")
-		once             = fs.Bool("once", false, "print one snapshot and exit (for scripting)")
-		noColor          = fs.Bool("no-color", false, "disable ANSI color (also honors NO_COLOR)")
-		showVer          = fs.Bool("version", false, "print version and exit")
-		claudeStatusLine = fs.Bool("claude-statusline", false, "capture Claude Code status-line JSON from stdin and print quota")
+		refresh = fs.Duration("refresh", runner.DefaultInterval, "interval between automatic refreshes (e.g. 30s, 2m)")
+		once    = fs.Bool("once", false, "print one snapshot and exit (for scripting)")
+		noColor = fs.Bool("no-color", false, "disable ANSI color (also honors NO_COLOR)")
+		showVer = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "substatus — subscription & quota status for local AI CLIs\n\n")
@@ -62,7 +56,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		fmt.Fprintf(fs.Output(), "Flags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(fs.Output(), "\nProviders: Codex, Claude, Gemini (agy), OpenCode.\n")
-		fmt.Fprintf(fs.Output(), "Gemini uses agy's /usage; Codex uses app-server status; Claude uses its status-line JSON.\n")
+		fmt.Fprintf(fs.Output(), "Claude and Gemini use their CLIs' /usage; Codex uses app-server status.\n")
 		fmt.Fprintf(fs.Output(), "No provider credential files are read. OpenCode uses OPENCODE_API_KEY.\n")
 	}
 	if err := fs.Parse(args); err != nil {
@@ -73,13 +67,6 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	}
 	if *showVer {
 		fmt.Fprintln(stdout, "substatus", provider.Version)
-		return 0
-	}
-	if *claudeStatusLine {
-		if err := provider.ClaudeStatusLine(stdin, stdout); err != nil {
-			fmt.Fprintln(stderr, "substatus: could not capture Claude status-line quota JSON")
-			return 1
-		}
 		return 0
 	}
 	if *refresh <= 0 {

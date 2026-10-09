@@ -11,97 +11,118 @@ import (
 	"github.com/local/substatus/internal/status"
 )
 
-func TestClaudeUsesOnlyStatusLineOutput(t *testing.T) {
-	fakeCLI(t, "claude", "exit 99\n") // the application must never launch Claude
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("LOCALAPPDATA", t.TempDir())
-	got := (Claude{}).Fetch(context.Background())
-	if got.State != status.StateUnavailable || len(got.Windows) != 0 || !strings.Contains(got.Note, "status-line") {
-		t.Fatalf("got %+v", got)
-	}
-	path, err := ClaudeUsagePath()
-	if err != nil {
-		t.Fatal(err)
-	}
-	input := `{"session_id":"private-id","transcript_path":"private-path","rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1893456000},"seven_day":{"used_percentage":41.2,"resets_at":1894060800}},"context_window":{"used_percentage":90},"unknown_secret":"private-token"}`
-	if err := SaveClaudeStatusLine(strings.NewReader(input), path, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(data), "private-") || strings.Contains(string(data), "context_window") {
-		t.Fatal("persisted non-quota session data")
-	}
-	fi, err := os.Stat(path)
-	if err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("cache permissions: %v, %v", fi, err)
-	}
-	got = (Claude{}).Fetch(context.Background())
-	if got.State != status.StateOK || got.Quality != status.QualityCLI || len(got.Windows) != 2 {
-		t.Fatalf("got %+v", got)
-	}
-	if got.Windows[0].Label != "5h" || got.Windows[0].Percent != 23.5 || got.Windows[0].ResetsAt.Unix() != 1893456000 {
-		t.Fatalf("5h = %+v", got.Windows[0])
-	}
-}
+// Output captured from `claude -p /usage --output-format json` (Claude Code
+// 2.1.295, 2026-10-09), trimmed. num_turns 0 and local_command confirm /usage
+// ran locally without a model turn.
+const claudeLiveUsageOutput = `{"type":"result","subtype":"success","is_error":false,"num_turns":0,"total_cost_usd":0,"local_command":"usage","session_id":"private-session","result":"You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 4% used · resets Oct 9, 1:50pm (UTC)\nCurrent week (all models): 37% used · resets Oct 14, 10am (UTC)\nCurrent week (Fable): 0% used · resets Oct 14, 10am (UTC)\n\nWhat's contributing to your limits usage?\nLast 24h · 1928 requests · 10 sessions\n  94% of your usage came from subagent-heavy sessions\n"}`
 
-func TestClaudeDoesNotUseStaleOrExpiredQuotas(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("LOCALAPPDATA", t.TempDir())
-	path, err := ClaudeUsagePath()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		input   string
-		at      time.Time
-		state   status.State
-		windows int
-	}{
-		{`{"rate_limits":{"five_hour":{"used_percentage":0}}}`, time.Now(), status.StateOK, 1},
-		{`{"rate_limits":{"five_hour":{"used_percentage":null}}}`, time.Now(), status.StateUnavailable, 0},
-		{`{"context_window":{"used_percentage":70}}`, time.Now(), status.StateUnavailable, 0},
-		{`{"rate_limits":{"five_hour":{"used_percentage":40}}}`, time.Now().Add(-10 * time.Minute), status.StateUnavailable, 0},
-		{`{"rate_limits":{"five_hour":{"used_percentage":40,"resets_at":1}}}`, time.Now(), status.StateUnavailable, 0},
-		// spend_limit is documented to exceed 100 once the limit is passed.
-		{`{"rate_limits":{"spend_limit":{"used_percentage":112.5,"resets_at":1893456000,"used_usd":562.5,"limit_usd":500,"period":"monthly"}}}`, time.Now(), status.StateOK, 1},
-	} {
-		if err := SaveClaudeStatusLine(strings.NewReader(tc.input), path, tc.at); err != nil {
-			t.Fatal(err)
-		}
-		got := (Claude{}).Fetch(context.Background())
-		if got.State != tc.state || len(got.Windows) != tc.windows {
-			t.Fatalf("got %+v; want %v, %d windows", got, tc.state, tc.windows)
-		}
-	}
-}
-
-func TestClaudeRejectsInvalidStatusLine(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "usage.json")
-	for _, input := range []string{
-		`{`, `null`,
-		`{"rate_limits":{"five_hour":{"used_percentage":101}}}`,
-		`{"rate_limits":{"five_hour":{"used_percentage":-1}}}`,
-		`{"rate_limits":{"seven_day":{"used_percentage":100.5}}}`,
-		`{"rate_limits":{"spend_limit":{"used_percentage":-1}}}`,
-		`{"rate_limits":{"five_hour":{"used_percentage":"secret"}}}`,
-		`{}` + `{}`, strings.Repeat(" ", maxBody+1),
-	} {
-		if err := SaveClaudeStatusLine(strings.NewReader(input), path, time.Now()); err == nil {
-			t.Fatalf("accepted invalid input %q", input[:min(len(input), 100)])
-		}
-	}
-}
-
-func writeFile(t *testing.T, name, content string) string {
+func claudeCLI(t *testing.T, output string) (argsPath, envPath string) {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
+	argsPath = filepath.Join(t.TempDir(), "args")
+	envPath = filepath.Join(t.TempDir(), "env")
+	t.Setenv("SUBSTATUS_TEST_ARGS", argsPath)
+	t.Setenv("SUBSTATUS_TEST_ENV", envPath)
+	t.Setenv("SUBSTATUS_TEST_OUTPUT", output)
+	fakeCLI(t, "claude", `printf '%s' "$*" > "$SUBSTATUS_TEST_ARGS"
+printf '%s|%s' "${OPENCODE_API_KEY-}" "${CLAUDE_CODE_OAUTH_TOKEN-}" > "$SUBSTATUS_TEST_ENV"
+printf '%s\n' "$SUBSTATUS_TEST_OUTPUT"
+`)
+	return argsPath, envPath
+}
+
+func TestClaudeRunsLocalUsageCommand(t *testing.T) {
+	t.Setenv("OPENCODE_API_KEY", "secret-opencode-key")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "claude-own-token")
+	argsPath, envPath := claudeCLI(t, claudeLiveUsageOutput)
+
+	got := (Claude{}).Fetch(context.Background())
+	if got.State != status.StateOK || got.Quality != status.QualityCLI || len(got.Windows) != 3 {
+		t.Fatalf("got %+v", got)
 	}
-	return p
+	want := []struct {
+		label   string
+		percent float64
+	}{{"session", 4}, {"week (all models)", 37}, {"week (Fable)", 0}}
+	for i, w := range want {
+		if got.Windows[i].Label != w.label || got.Windows[i].Percent != w.percent || got.Windows[i].ResetsAt.IsZero() {
+			t.Errorf("window %d = %+v, want %+v", i, got.Windows[i], w)
+		}
+	}
+	if args, _ := os.ReadFile(argsPath); string(args) != "-p /usage --output-format json --no-session-persistence" {
+		t.Fatalf("claude args = %q", args)
+	}
+	if env, _ := os.ReadFile(envPath); string(env) != "|claude-own-token" {
+		t.Fatalf("claude env (OPENCODE_API_KEY|CLAUDE_CODE_OAUTH_TOKEN) = %q", env)
+	}
+	if strings.Contains(got.Note, "private-session") {
+		t.Fatal("session identity leaked")
+	}
+}
+
+func TestClaudeRejectsModelTurnsAndFailures(t *testing.T) {
+	for _, tc := range []struct {
+		output string
+		state  status.State
+	}{
+		{`{"type":"result","subtype":"success","num_turns":1,"result":"Current session: 4% used"}`, status.StateUnsupported},
+		{`{"type":"result","subtype":"success","num_turns":0,"result":"Current session: 4% used"}`, status.StateUnsupported},
+		{`{"type":"result","subtype":"error","is_error":true,"num_turns":0,"local_command":"usage","result":"secret"}`, status.StateError},
+		{`{"type":"result","subtype":"success","num_turns":0,"local_command":"usage","result":"You are using API billing"}`, status.StateUnavailable},
+		{`not-json-secret`, status.StateError},
+		{`{}`, status.StateError},
+	} {
+		claudeCLI(t, tc.output)
+		got := (Claude{}).Fetch(context.Background())
+		if got.State != tc.state || len(got.Windows) != 0 || strings.Contains(got.Note, "secret") {
+			t.Errorf("output %s: got %+v, want %v", tc.output, got, tc.state)
+		}
+	}
+}
+
+func TestClaudeWithoutCLIIsNotInstalled(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	if got := (Claude{}).Fetch(context.Background()); got.State != status.StateNotInstalled {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestParseClaudeUsageNeverFabricates(t *testing.T) {
+	now := time.Date(2026, 12, 30, 12, 0, 0, 0, time.UTC)
+	got := parseClaudeUsage(strings.Join([]string{
+		"Current session: 12.5% used · resets 1:50pm (UTC)",
+		"Current week (all models): 101% used · resets Jan 3, 10am (UTC)", // invalid percent
+		"Current week (Fable): 7% used · resets someday",                  // unparseable reset
+		"Current week (Opus): 9% used",
+		"  94% of your usage came from subagent-heavy sessions",
+	}, "\n"), now)
+	if len(got) != 3 {
+		t.Fatalf("windows = %+v", got)
+	}
+	if !got[0].ResetsAt.Equal(time.Date(2026, 12, 30, 13, 50, 0, 0, time.UTC)) || got[0].Percent != 12.5 {
+		t.Errorf("session = %+v", got[0])
+	}
+	if got[1].Label != "week (Fable)" || !got[1].ResetsAt.IsZero() {
+		t.Errorf("fable = %+v", got[1])
+	}
+	if got[2].Label != "week (Opus)" || !got[2].ResetsAt.IsZero() {
+		t.Errorf("opus = %+v", got[2])
+	}
+}
+
+func TestParseClaudeResetInfersYearAndDay(t *testing.T) {
+	now := time.Date(2026, 12, 30, 12, 0, 0, 0, time.UTC)
+	for in, want := range map[string]time.Time{
+		"Jan 3, 10am (UTC)":        time.Date(2027, 1, 3, 10, 0, 0, 0, time.UTC),
+		"Dec 30, 1:50pm (UTC)":     time.Date(2026, 12, 30, 13, 50, 0, 0, time.UTC),
+		"11am (UTC)":               time.Date(2026, 12, 31, 11, 0, 0, 0, time.UTC),
+		"Feb 1, 2027, 9am (UTC)":   time.Date(2027, 2, 1, 9, 0, 0, 0, time.UTC),
+		"Dec 31, 9am (Asia/Tokyo)": time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
+		"Dec 31, 9am (Not/AZone)":  {},
+		"Dec 31, 9am":              {},
+		"tomorrow (UTC)":           {},
+	} {
+		if got := parseClaudeReset(in, now); !got.Equal(want) {
+			t.Errorf("parseClaudeReset(%q) = %v, want %v", in, got, want)
+		}
+	}
 }
