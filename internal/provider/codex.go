@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"os"
-	"os/exec"
 	"slices"
 	"time"
 
@@ -30,22 +28,14 @@ func (c Codex) Fetch(ctx context.Context) status.Provider {
 		Source:  "codex app-server: account/rateLimits/read",
 		Quality: status.QualityCLI,
 	}
-	binary, err := exec.LookPath("codex")
-	if err != nil {
-		res.State, res.Note = status.StateNotInstalled, "`codex` CLI not found on PATH"
-		return res
+	ctx, cmd, cleanup, err := newCLICommand(ctx, "codex", nil, "app-server")
+	if errors.Is(err, errNotInstalled) {
+		return fail(res, status.StateNotInstalled, "`codex` CLI not found on PATH")
 	}
-	dir, err := os.MkdirTemp("", "substatus-")
 	if err != nil {
 		return codexFailure(ctx, res, err)
 	}
-	defer os.RemoveAll(dir)
-	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, binary, "app-server")
-	cmd.Env = envWithoutSecrets(os.Environ())
-	cmd.Dir = dir // private and empty: no project configuration is picked up
-	cmd.WaitDelay = time.Second
+	defer cleanup()
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return codexFailure(ctx, res, err)
@@ -99,17 +89,14 @@ func (c Codex) Fetch(ctx context.Context) status.Provider {
 	}
 	switch {
 	case account.Account == nil && account.RequiresOpenaiAuth != nil && !*account.RequiresOpenaiAuth:
-		res.State = status.StateUnavailable
-		res.Note = "the active Codex model provider does not use OpenAI sign-in; no ChatGPT subscription quota applies"
-		return res
+		return fail(res, status.StateUnavailable,
+			"the active Codex model provider does not use OpenAI sign-in; no ChatGPT subscription quota applies")
 	case account.Account == nil:
-		res.State = status.StateAuthMissing
-		res.Note = "sign in using the official Codex CLI; this app never starts a login"
-		return res
+		return fail(res, status.StateAuthMissing,
+			"sign in using the official Codex CLI; this app never starts a login")
 	case account.Account.Type == "apiKey" || account.Account.Type == "amazonBedrock":
-		res.State = status.StateUnavailable
-		res.Note = "Codex subscription quotas require ChatGPT-backed sign-in; API billing is separate"
-		return res
+		return fail(res, status.StateUnavailable,
+			"Codex subscription quotas require ChatGPT-backed sign-in; API billing is separate")
 	}
 	res.Plan = cleanCLIText(account.Account.Plan)
 	// The published request has no params; send exactly that shape.
@@ -122,9 +109,8 @@ func (c Codex) Fetch(ctx context.Context) status.Provider {
 		return codexFailure(ctx, res, err)
 	}
 	if len(windows) == 0 {
-		res.State = status.StateUnavailable
-		res.Note = "Codex returned no quota percentages; check /status in the official CLI"
-		return res
+		return fail(res, status.StateUnavailable,
+			"Codex returned no quota percentages; check /status in the official CLI")
 	}
 	res.State, res.Windows = status.StateOK, windows
 	res.Note = "current usage from the documented Codex app-server interface"
@@ -187,17 +173,15 @@ func (r *codexRPC) call(method string, params any, out any) error {
 // codexFailure maps an internal error to a safe note: subprocess output,
 // account identity and RPC messages are never rendered.
 func codexFailure(ctx context.Context, res status.Provider, err error) status.Provider {
-	res.State, res.Windows = status.StateError, nil
-	res.Note = "Codex status retrieval failed; check the CLI's sign-in, version, and connectivity"
 	var rpcErr *codexRPCError
 	switch {
 	case ctx.Err() != nil:
-		res.Note = "Codex status command timed out or was cancelled"
+		return fail(res, status.StateError, "Codex status command timed out or was cancelled")
 	case errors.As(err, &rpcErr) && rpcErr.Code == -32601:
-		res.State = status.StateUnsupported
-		res.Note = "this Codex CLI version lacks the documented status method; update it or use /status manually"
+		return fail(res, status.StateUnsupported,
+			"this Codex CLI version lacks the documented status method; update it or use /status manually")
 	}
-	return res
+	return fail(res, status.StateError, "Codex status retrieval failed; check the CLI's sign-in, version, and connectivity")
 }
 
 type codexLimits struct {

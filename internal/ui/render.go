@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/rothzeta/substatus/internal/status"
@@ -29,7 +30,7 @@ const (
 	fgGray  = esc + "90m"
 )
 
-// Palette holds the escape codes actually in use.
+// Palette controls whether output is colored.
 type Palette struct {
 	Enabled bool
 }
@@ -110,7 +111,7 @@ func srcLine(p status.Provider) string {
 func windowLine(w status.Window, pal Palette) string {
 	name := fmt.Sprintf("%-22s", w.Label)
 	bar := progressBar(w.Percent, 20)
-	pct := status.FormatPercent(w.Percent)
+	pct := formatPercent(w.Percent)
 	line := name + " " + colorByPercent(bar, w.Percent, pal) + " " + pct
 	if !w.ResetsAt.IsZero() {
 		line += "  " + pal.Dim("resets "+w.ResetsAt.Local().Format("15:04 Jan 2"))
@@ -152,4 +153,9 @@ func stateBadge(p status.Provider, pal Palette) string {
 	default:
 		return pal.Red("● error")
 	}
+}
+
+// formatPercent renders a used percentage to at most two decimals.
+func formatPercent(p float64) string {
+	return strconv.FormatFloat(math.Round(p*100)/100, 'f', -1, 64) + "%"
 }

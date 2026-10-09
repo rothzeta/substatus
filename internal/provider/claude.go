@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"regexp"
 	"strconv"
 	"strings"
@@ -27,19 +26,8 @@ func (Claude) Fetch(ctx context.Context) status.Provider {
 	// Claude Code's own credential variables stay; other secrets are scrubbed.
 	keep := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
 	out, err := runCLI(ctx, "claude", keep, "-p", "/usage", "--output-format", "json", "--no-session-persistence")
-	switch {
-	case errors.Is(err, errNotInstalled):
-		res.State, res.Note = status.StateNotInstalled, "`claude` CLI not found on PATH"
-		return res
-	case errors.Is(err, errOutputLimit):
-		res.State, res.Note = status.StateError, "claude /usage output exceeded the 1 MiB safety limit"
-		return res
-	case ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded):
-		res.State, res.Note = status.StateError, "claude /usage command timed out or was cancelled"
-		return res
-	case err != nil:
-		res.State, res.Note = status.StateError, "claude /usage command failed; check sign-in with `claude auth`"
-		return res
+	if err != nil {
+		return cliFailure(ctx, res, "claude", "check sign-in with `claude auth`", err)
 	}
 
 	var result struct {
@@ -51,26 +39,21 @@ func (Claude) Fetch(ctx context.Context) status.Provider {
 		Result       string `json:"result"`
 	}
 	if err := json.Unmarshal(out, &result); err != nil || result.Type != "result" {
-		res.State, res.Note = status.StateError, "could not parse claude /usage JSON output"
-		return res
+		return fail(res, status.StateError, "could not parse claude /usage JSON output")
 	}
 	// A model turn means this CLI version sent /usage to the model as a prompt.
 	if result.LocalCommand != "usage" || result.NumTurns != 0 {
-		res.State, res.Note = status.StateUnsupported, "this Claude Code version does not run /usage locally in print mode; update it"
-		return res
+		return fail(res, status.StateUnsupported, "this Claude Code version does not run /usage locally in print mode; update it")
 	}
 	if result.IsError || result.Subtype != "success" {
-		res.State, res.Note = status.StateError, "claude /usage did not succeed; check sign-in with `claude auth`"
-		return res
+		return fail(res, status.StateError, "claude /usage did not succeed; check sign-in with `claude auth`")
 	}
 	windows := parseClaudeUsage(result.Result, time.Now())
 	if len(windows) == 0 && strings.Contains(result.Result, "% used") {
-		res.State, res.Note = status.StateError, "claude /usage output format is not recognised; update substatus"
-		return res
+		return fail(res, status.StateError, "claude /usage output format is not recognised; update substatus")
 	}
 	if len(windows) == 0 {
-		res.State, res.Note = status.StateUnavailable, "claude /usage reported no subscription quota; API-key billing has none"
-		return res
+		return fail(res, status.StateUnavailable, "claude /usage reported no subscription quota; API-key billing has none")
 	}
 	res.State, res.Windows = status.StateOK, windows
 	res.Note = "live usage from Claude Code's /usage command"

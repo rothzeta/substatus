@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -27,6 +28,16 @@ import (
 
 // version is set at release build time with -ldflags "-X main.version=v1.2.3".
 var version = "dev"
+
+// currentVersion falls back to the module version recorded by `go install`.
+func currentVersion() string {
+	if version == "dev" {
+		if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+			return bi.Main.Version
+		}
+	}
+	return version
+}
 
 // minRefresh keeps automatic refreshes from respawning every CLI back to back;
 // one cycle costs several CPU-seconds.
@@ -44,7 +55,7 @@ func main() {
 func configuredProviders() []runner.Provider {
 	return []runner.Provider{
 		provider.Claude{},
-		provider.Codex{ClientVersion: version},
+		provider.Codex{ClientVersion: currentVersion()},
 		provider.Gemini{},
 		provider.OpenCode{},
 	}
@@ -79,7 +90,7 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if *showVer {
-		fmt.Fprintln(stdout, "substatus", version)
+		fmt.Fprintln(stdout, "substatus", currentVersion())
 		return 0
 	}
 
@@ -161,12 +172,12 @@ drain:
 
 // saveOpenCodeKey prompts for (or reads piped) OpenCode API key and stores it.
 func saveOpenCodeKey(ctx context.Context, stdin *os.File, stdout, stderr io.Writer) int {
-	interactive := term.IsTerminal(stdin)
-	if interactive {
+	tty := term.IsTerminal(stdin)
+	if tty {
 		fmt.Fprint(stderr, "OpenCode API key: ")
 	}
 	key, err := term.ReadSecret(ctx, stdin)
-	if interactive {
+	if tty {
 		fmt.Fprintln(stderr)
 	}
 	if err == nil {

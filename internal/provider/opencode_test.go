@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -169,5 +171,24 @@ func TestOpenCodeDoesNotFollowRedirects(t *testing.T) {
 	case <-leaked:
 		t.Fatal("followed a redirect with the bearer key")
 	default:
+	}
+}
+
+func TestOpenCodeKeyUsesFirstLineOnly(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("OPENCODE_API_KEY", "")
+	path, err := OpenCodeKeyPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("  sk-first \nsecond line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := opencodeKey(); got != "sk-first" {
+		t.Fatalf("opencodeKey() = %q, want %q", got, "sk-first")
 	}
 }

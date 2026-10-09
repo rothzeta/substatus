@@ -20,7 +20,7 @@ const clearScreen = esc + "2J" + esc + "H"
 type Options struct {
 	Interval time.Duration
 	Palette  Palette
-	In       *os.File // default os.Stdin
+	In       *os.File
 	Out      io.Writer
 }
 
@@ -35,12 +35,6 @@ type TUI struct {
 
 // NewTUI builds an interactive TUI.
 func NewTUI(opts Options) *TUI {
-	if opts.Out == nil {
-		opts.Out = os.Stdout
-	}
-	if opts.In == nil {
-		opts.In = os.Stdin
-	}
 	return &TUI{opts: opts, refresh: make(chan struct{}, 1), quit: make(chan struct{})}
 }
 
