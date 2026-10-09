@@ -4,14 +4,25 @@ A Go TUI for subscription/quota status across **Codex**, **Claude**,
 **Gemini (via `agy`)**, and **OpenCode**. It refreshes on a configurable interval
 and displays provider-reported used percentages and reset times.
 
-## Build and run
+## Install
 
-Requires Go 1.24+; no cgo or external Go dependencies.
+```sh
+curl -fsSL https://raw.githubusercontent.com/rothzeta/substatus/main/install.sh | sh
+```
+
+or, from a checkout, `./install.sh`. The script builds with Go 1.24+ (no cgo or
+external Go dependencies), or with Docker (`golang:1.24-bookworm`) when Go is not
+installed, and installs `substatus` into `$BIN_DIR` (default `~/.local/bin`). It
+then offers to save an OpenCode API key; set `SUBSTATUS_NO_PROMPT=1` to skip.
+
+To build by hand:
 
 ```sh
 go build -o substatus ./cmd/substatus
 ./substatus --once --no-color
 ```
+
+## Usage
 
 ```text
 substatus [flags]
@@ -20,6 +31,7 @@ substatus [flags]
   -once               print one snapshot and exit
   -no-color           disable ANSI color (also honors NO_COLOR)
   -version            print version and exit
+  -set-opencode-key   read an OpenCode API key from stdin and save it
 ```
 
 Interactive keys: `r` refreshes, `q` or Ctrl-C quits. The UI redraws on resize.
@@ -33,12 +45,24 @@ provider answers, so one slow CLI never holds up the others.
 | **Codex** | `codex app-server`, documented JSON-RPC `account/read` and `account/rateLimits/read` | Install Codex and sign in through its official CLI. Authentication stays inside Codex. Uses stdin/stdout and never sends a model prompt. API-key-only accounts do not expose ChatGPT subscription quotas. |
 | **Claude** | `claude -p /usage --output-format json --no-session-persistence` | Install and sign in through Claude Code. `/usage` runs locally: the app requires `local_command: "usage"` and `num_turns: 0`, so no model turn runs and no quota is spent. The quota lines are human-readable text; unrecognised lines are skipped and unparseable reset times are left blank rather than guessed. |
 | **Gemini (`agy`)** | `agy --print /usage --output-format json` | Install and sign in through Antigravity CLI, version 1.1.11 or later. Parses `command.data.groups[].buckets[]`, `remaining_fraction`, and `reset_time`. These are Antigravity quotas; its Claude/GPT model buckets are not Claude or Codex subscription quotas. |
-| **OpenCode Go** | `GET https://opencode.ai/zen/go/v1/usage` | Set `OPENCODE_API_KEY`. Preserves the requested direct API-key integration with no CLI fallback. This first-party, source-derived route has no stable public API contract and reports Go usage windows, not Zen credit balance. |
+| **OpenCode Go** | `GET https://opencode.ai/zen/go/v1/usage` | Run `substatus --set-opencode-key` or set `OPENCODE_API_KEY` (see below). Preserves the requested direct API-key integration with no CLI fallback. This first-party, source-derived route has no stable public API contract and reports Go usage windows, not Zen credit balance. |
 
 A missing CLI, missing sign-in, unavailable data, unsupported CLI version, and
 failed status request have distinct rows. Missing/null quota fields never become
 0% or 100%. Reset times and window durations come from provider output; the app
 does not infer quotas from token counts or plan names.
+
+## OpenCode API key
+
+```sh
+substatus --set-opencode-key                    # hidden prompt
+substatus --set-opencode-key < ~/opencode.key   # or piped, first line
+```
+
+The key is saved to `substatus/opencode_api_key` under the user config
+directory (`$XDG_CONFIG_HOME` or `~/.config` on Linux, `~/Library/Application
+Support` on macOS), written atomically with mode 0600. `OPENCODE_API_KEY`, when
+set, takes precedence. Delete the file to forget the key.
 
 ## Provider documentation and credential boundaries
 
@@ -84,8 +108,8 @@ that limitation and points to the official CLI/account interface.
 Provider commands have finite deadlines and output limits. CLI stderr, raw RPC
 errors, account identity, and provider credentials are not rendered. OpenCode's
 API key is excluded from child-process environments and is sent only to its
-requested first-party API route. There is no app telemetry, and substatus writes
-no files.
+requested first-party API route. There is no app telemetry. The only file substatus
+writes is the OpenCode key, and only on `--set-opencode-key`.
 
 ## Verification
 
