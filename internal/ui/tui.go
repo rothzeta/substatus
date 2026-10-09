@@ -2,42 +2,35 @@ package ui
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/local/substatus/internal/status"
 )
 
+// clearScreen clears the terminal and homes the cursor.
+const clearScreen = esc + "2J" + esc + "H"
+
 // Options configures the interactive TUI.
 type Options struct {
 	Interval time.Duration
 	Palette  Palette
-	In       *os.File
+	In       *os.File // default os.Stdin
 	Out      io.Writer
 }
 
-// TUI is a small interactive loop: it redraws on every snapshot, on terminal
-// resize, and on keypresses (r = refresh now, q / Ctrl-C = quit).
+// TUI is a small interactive loop: the caller redraws on every snapshot and
+// terminal resize; keypresses request a refresh (r) or quit (q / Ctrl-C).
 type TUI struct {
 	opts     Options
-	width    int
-	height   int
-	mu       sync.Mutex
-	snap     status.Snapshot
-	started  bool
 	refresh  chan struct{}
 	quit     chan struct{}
 	quitOnce sync.Once
 }
-
-const minWidth = 40
 
 // NewTUI builds an interactive TUI.
 func NewTUI(opts Options) *TUI {
@@ -47,7 +40,7 @@ func NewTUI(opts Options) *TUI {
 	if opts.In == nil {
 		opts.In = os.Stdin
 	}
-	return &TUI{opts: opts, width: 80, height: 24, refresh: make(chan struct{}, 1), quit: make(chan struct{})}
+	return &TUI{opts: opts, refresh: make(chan struct{}, 1), quit: make(chan struct{})}
 }
 
 // Refresh returns a channel that receives a signal when the user presses "r".
@@ -58,91 +51,51 @@ func (t *TUI) Quit() <-chan struct{} { return t.quit }
 
 // Start enables raw terminal input where supported and starts the key reader.
 // The returned function restores the terminal's previous settings.
-func (t *TUI) Start(ctx context.Context) func() {
+func (t *TUI) Start() (restore func()) {
 	restore, err := enableRawInput(t.opts.In)
 	if err != nil {
-		restore = func() {}
+		restore = func() {} // line-buffered input still works
 	}
-	go t.Keys(ctx)
+	go t.keys()
 	return restore
 }
 
-func (t *TUI) signalQuit() {
-	t.quitOnce.Do(func() { close(t.quit) })
-}
-
-// Draw clears and repaints the current snapshot.
-func (t *TUI) Draw(snap status.Snapshot, interval time.Duration) {
-	t.mu.Lock()
-	t.snap = snap
-	t.mu.Unlock()
-
+// Draw clears and repaints the screen with snap.
+func (t *TUI) Draw(snap status.Snapshot) {
+	pal := t.opts.Palette
 	var b strings.Builder
-	b.WriteString(esc + "2J" + esc + "H") // clear + home
-	b.WriteString(header(snap, t.opts.Palette) + "\n")
-	b.WriteString(t.opts.Palette.Dim(fmt.Sprintf("refresh every %s · r refresh · q quit", interval)) + "\n\n")
+	b.WriteString(clearScreen)
+	b.WriteString(header(snap, pal) + "\n")
+	b.WriteString(pal.Dim(fmt.Sprintf("refresh every %s · r refresh · q quit", t.opts.Interval)) + "\n\n")
 	for _, p := range snap.Providers {
-		b.WriteString(card(p, t.opts.Palette))
-		b.WriteString("\n\n")
+		b.WriteString(card(p, pal) + "\n\n")
 	}
 	fmt.Fprint(t.opts.Out, b.String())
 }
 
 // Clear wipes the screen on exit.
 func (t *TUI) Clear() {
-	fmt.Fprint(t.opts.Out, esc+"2J"+esc+"H")
+	fmt.Fprint(t.opts.Out, clearScreen)
 }
 
-// Keys reads single keystrokes until ctx is cancelled.
-func (t *TUI) Keys(ctx context.Context) {
+// keys reads single keystrokes until quit or end of input.
+func (t *TUI) keys() {
 	r := bufio.NewReader(t.opts.In)
 	for {
 		ch, err := r.ReadByte()
 		if err != nil {
-			t.signalQuit()
+			t.quitOnce.Do(func() { close(t.quit) })
 			return
 		}
 		switch ch {
 		case 'q', 'Q', 3: // 3 = Ctrl-C
-			t.signalQuit()
+			t.quitOnce.Do(func() { close(t.quit) })
 			return
 		case 'r', 'R':
 			select {
 			case t.refresh <- struct{}{}:
-			default:
+			default: // a refresh request is already queued
 			}
-		case '\n', '\r':
-		}
-		select {
-		case <-ctx.Done():
-			return
-		default:
 		}
 	}
-}
-
-// ResizeSignals delivers SIGWINCH notifications until ctx is cancelled.
-func ResizeSignals(ctx context.Context) <-chan os.Signal {
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGWINCH)
-	go func() {
-		<-ctx.Done()
-		signal.Stop(ch)
-		close(ch)
-	}()
-	return ch
-}
-
-// TerminalSize returns the current terminal size, falling back to 80x24.
-func TerminalSize(out io.Writer) (width, height int) {
-	width, height = 80, 24
-	f, ok := out.(*os.File)
-	if !ok {
-		return
-	}
-	w, h, err := termSize(f)
-	if err != nil || w <= 0 || h <= 0 {
-		return
-	}
-	return w, h
 }

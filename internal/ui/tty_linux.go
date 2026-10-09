@@ -6,23 +6,6 @@ import (
 	"unsafe"
 )
 
-type winsize struct {
-	Row    uint16
-	Col    uint16
-	Xpixel uint16
-	Ypixel uint16
-}
-
-// termSize reads the terminal window size via TIOCGWINSZ.
-func termSize(f *os.File) (width, height int, err error) {
-	var ws winsize
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TIOCGWINSZ), uintptr(unsafe.Pointer(&ws)))
-	if errno != 0 {
-		return 0, 0, errno
-	}
-	return int(ws.Col), int(ws.Row), nil
-}
-
 // enableRawInput puts a terminal into single-character mode and returns a
 // restoration function. Non-terminal inputs remain line/buffer based.
 func enableRawInput(f *os.File) (func(), error) {

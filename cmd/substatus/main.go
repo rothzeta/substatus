@@ -73,7 +73,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	pal := ui.Palette{Enabled: ui.ColorEnabled(*noColor)}
+	out, _ := stdout.(*os.File) // nil (no color) for non-file writers
+	pal := ui.Palette{Enabled: ui.ColorEnabled(*noColor, out)}
 	r := runner.New(*refresh, configuredProviders()...)
 
 	if *once {
@@ -86,7 +87,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	tui := ui.NewTUI(ui.Options{Interval: *refresh, Palette: pal, Out: stdout})
 	defer tui.Clear()
-	restoreInput := tui.Start(ctx)
+	restoreInput := tui.Start()
 	defer restoreInput()
 
 	// Fetching happens in the runner, so this loop only draws and stays
@@ -105,9 +106,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 				return 0
 			}
 			last = snap
-			tui.Draw(last, *refresh)
+			tui.Draw(last)
 		case <-resizes:
-			tui.Draw(last, *refresh)
+			tui.Draw(last)
 		}
 	}
 }
