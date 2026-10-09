@@ -33,12 +33,22 @@ sha256() {
 	fi
 }
 
+cleanup() {
+	[ -z "$tmp" ] || rm -rf "$tmp"
+	[ -z "$bin" ] || rm -f "$bin.new"
+}
+
 main() {
 	repo=rothzeta/substatus
 	bin_dir=${BIN_DIR:-$HOME/.local/bin}
 	bin=$bin_dir/substatus
 	need curl
 	need tar
+	tmp=
+	trap cleanup EXIT
+	trap 'cleanup; exit 130' INT
+	trap 'cleanup; exit 143' TERM
+	trap 'cleanup; exit 129' HUP
 
 	case $(uname -s) in
 	Linux) os=linux ;;
@@ -75,7 +85,6 @@ main() {
 		asset=substatus_${os}_${arch}.tar.gz
 		base=https://github.com/$repo/releases/download/$version
 		tmp=$(mktemp -d)
-		trap 'rm -rf "$tmp"' EXIT
 		echo "Downloading substatus $version ($os/$arch)"
 		curl -fsSL -o "$tmp/$asset" "$base/$asset" || die "could not download $base/$asset"
 		curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt" || die "could not download checksums"
@@ -95,10 +104,16 @@ main() {
 		fi
 	fi
 
-	case ":$PATH:" in
-	*":$bin_dir:"*) ;;
-	*) echo "Note: $bin_dir is not on your PATH; add it to your shell profile." ;;
-	esac
+	if [ -z "$installed" ]; then
+		case ":$PATH:" in
+		*":$bin_dir:"*) ;;
+		*) echo "Note: $bin_dir is not on your PATH; add it to your shell profile." ;;
+		esac
+	fi
+	other=$(command -v substatus 2>/dev/null) || other=
+	if [ -n "$other" ] && [ "$other" != "$bin" ]; then
+		echo "Note: $other earlier on your PATH shadows $bin."
+	fi
 
 	# On first install, offer to save an OpenCode API key.
 	if [ -z "$installed" ] && [ -z "${SUBSTATUS_NO_PROMPT:-}" ] && [ -z "${OPENCODE_API_KEY:-}" ] &&

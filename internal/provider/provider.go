@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/rothzeta/substatus/internal/status"
 )
 
 // maxBody bounds every response body or CLI output we read.
@@ -41,21 +43,11 @@ func validPercent(p, max float64) bool {
 // planted in a shared directory) is picked up. Stderr is discarded: it is
 // never rendered.
 func runCLI(ctx context.Context, name string, keepEnv []string, args ...string) ([]byte, error) {
-	binary, err := exec.LookPath(name)
-	if err != nil {
-		return nil, errNotInstalled
-	}
-	dir, err := os.MkdirTemp("", "substatus-")
+	ctx, cmd, cleanup, err := newCLICommand(ctx, name, keepEnv, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(dir)
-	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, binary, args...)
-	cmd.Env = envWithoutSecrets(os.Environ(), keepEnv...)
-	cmd.Dir = dir
-	cmd.WaitDelay = time.Second
+	defer cleanup()
 	stdout := &cappedWriter{limit: maxBody}
 	cmd.Stdout = stdout
 	err = cmd.Run()
@@ -68,6 +60,46 @@ func runCLI(ctx context.Context, name string, keepEnv []string, args ...string) 
 		return nil, err
 	}
 	return stdout.buf.Bytes(), nil
+}
+
+// newCLICommand prepares a provider CLI command with the safety bounds
+// runCLI documents. It returns the timeout context the command runs under and
+// a cleanup that cancels it and removes the working directory.
+func newCLICommand(ctx context.Context, name string, keepEnv []string, args ...string) (context.Context, *exec.Cmd, func(), error) {
+	binary, err := exec.LookPath(name)
+	if err != nil {
+		return ctx, nil, nil, errNotInstalled
+	}
+	dir, err := os.MkdirTemp("", "substatus-")
+	if err != nil {
+		return ctx, nil, nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Env = envWithoutSecrets(os.Environ(), keepEnv...)
+	cmd.Dir = dir
+	cmd.WaitDelay = time.Second
+	return ctx, cmd, func() { cancel(); os.RemoveAll(dir) }, nil
+}
+
+// fail returns res as a failure of the given state with note and no windows.
+func fail(res status.Provider, state status.State, note string) status.Provider {
+	res.State, res.Note, res.Windows = state, note, nil
+	return res
+}
+
+// cliFailure maps a runCLI error to a state and note for the tool's /usage
+// command; hint is appended to the generic failure.
+func cliFailure(ctx context.Context, res status.Provider, tool, hint string, err error) status.Provider {
+	switch {
+	case errors.Is(err, errNotInstalled):
+		return fail(res, status.StateNotInstalled, "`"+tool+"` CLI not found on PATH")
+	case errors.Is(err, errOutputLimit):
+		return fail(res, status.StateError, tool+" /usage output exceeded the 1 MiB safety limit")
+	case ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded):
+		return fail(res, status.StateError, tool+" /usage command timed out or was cancelled")
+	}
+	return fail(res, status.StateError, tool+" /usage command failed; "+hint)
 }
 
 // cappedWriter keeps at most limit bytes. It deliberately does not embed

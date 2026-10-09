@@ -138,3 +138,24 @@ func TestErrorNoteIsRed(t *testing.T) {
 		t.Errorf("card = %q", got)
 	}
 }
+
+func TestFormatPercent(t *testing.T) {
+	tests := []struct {
+		in   float64
+		want string
+	}{
+		{0, "0%"},
+		{8, "8%"},
+		{28, "28%"},
+		{0.9499, "0.95%"},
+		{29.1208, "29.12%"},
+		{99.996, "100%"},
+		{100, "100%"},
+		{112.5, "112.5%"},
+	}
+	for _, tt := range tests {
+		if got := formatPercent(tt.in); got != tt.want {
+			t.Errorf("formatPercent(%v) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

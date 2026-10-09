@@ -5,8 +5,6 @@
 package status
 
 import (
-	"math"
-	"strconv"
 	"time"
 )
 
@@ -19,9 +17,9 @@ const (
 	StateLoading State = iota
 	// StateOK means usage data was retrieved.
 	StateOK
-	// StateAuthMissing means the CLI/credentials needed for a source aren't present.
+	// StateAuthMissing means the user is not signed in or no credentials are configured.
 	StateAuthMissing
-	// StateNotInstalled means the provider CLI or config was not found on this host.
+	// StateNotInstalled means the provider CLI is not installed on this host.
 	StateNotInstalled
 	// StateUnsupported means the provider is present but exposes no stable usage source.
 	StateUnsupported
@@ -84,9 +82,4 @@ type Snapshot struct {
 	Providers  []Provider
 	CheckedAt  time.Time
 	Refreshing bool
-}
-
-// FormatPercent renders a used percentage to at most two decimals.
-func FormatPercent(p float64) string {
-	return strconv.FormatFloat(math.Round(p*100)/100, 'f', -1, 64) + "%"
 }

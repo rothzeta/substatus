@@ -22,39 +22,24 @@ func (Gemini) Fetch(ctx context.Context) status.Provider {
 		Quality: status.QualityCLI,
 	}
 	out, err := runCLI(ctx, "agy", nil, "--print", "/usage", "--output-format", "json")
-	switch {
-	case errors.Is(err, errNotInstalled):
-		res.State, res.Note = status.StateNotInstalled, "`agy` CLI not found on PATH"
-		return res
-	case errors.Is(err, errOutputLimit):
-		res.State, res.Note = status.StateError, "agy /usage output exceeded the 1 MiB safety limit"
-		return res
-	case ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded):
-		res.State, res.Note = status.StateError, "agy /usage command timed out or was cancelled"
-		return res
-	case err != nil:
-		res.State, res.Note = status.StateError, "agy /usage command failed; check the CLI's sign-in and version"
-		return res
+	if err != nil {
+		return cliFailure(ctx, res, "agy", "check the CLI's sign-in and version", err)
 	}
 
 	var response agyUsageResponse
 	if err := json.Unmarshal(out, &response); err != nil {
-		res.State, res.Note = status.StateError, "could not parse agy /usage JSON output"
-		return res
+		return fail(res, status.StateError, "could not parse agy /usage JSON output")
 	}
 	if !strings.EqualFold(response.Status, "SUCCESS") || !strings.EqualFold(response.Command.Name, "usage") {
-		res.State, res.Note = status.StateError, "agy did not return a successful /usage result"
-		return res
+		return fail(res, status.StateError, "agy did not return a successful /usage result")
 	}
 	windows, err := response.windows()
 	if err != nil {
-		res.State, res.Note = status.StateError, err.Error()
-		return res
+		return fail(res, status.StateError, err.Error())
 	}
 	if len(windows) == 0 {
-		res.State = status.StateUnavailable
-		res.Note = "agy /usage returned no active quota buckets; missing or disabled buckets have unknown usage"
-		return res
+		return fail(res, status.StateUnavailable,
+			"agy /usage returned no active quota buckets; missing or disabled buckets have unknown usage")
 	}
 	res.State, res.Windows = status.StateOK, windows
 	res.Note = "Antigravity quotas from /usage; Claude/GPT buckets are not Claude or Codex subscription quotas"

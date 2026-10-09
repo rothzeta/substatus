@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,8 +23,9 @@ const (
 )
 
 // OpenCode reads Go subscription usage directly from OpenCode's first-party
-// Zen API with OPENCODE_API_KEY, or else the key saved by SaveOpenCodeKey. The endpoint is present in OpenCode's server
-// source, but is not covered by a stable public API contract.
+// Zen API with OPENCODE_API_KEY, or else the key saved by SaveOpenCodeKey.
+// The endpoint is present in OpenCode's server source, but is not covered by
+// a stable public API contract.
 type OpenCode struct {
 	baseURL string // tests only; empty means opencodeOrigin
 }
@@ -43,27 +45,22 @@ func (o OpenCode) Fetch(ctx context.Context) status.Provider {
 	}
 	key := opencodeKey()
 	if key == "" {
-		res.State = status.StateAuthMissing
-		res.Note = "run `substatus --set-opencode-key` or set OPENCODE_API_KEY to query OpenCode Go usage"
-		return res
+		return fail(res, status.StateAuthMissing,
+			"run `substatus --set-opencode-key` or set OPENCODE_API_KEY to query OpenCode Go usage")
 	}
 	body, code, err := o.get(ctx, key)
 	if err != nil {
-		res.State, res.Note = status.StateError, "OpenCode usage request failed; check connectivity"
-		return res
+		return fail(res, status.StateError, "OpenCode usage request failed; check connectivity")
 	}
 	switch code {
 	case http.StatusOK:
 	case http.StatusUnauthorized:
-		res.State, res.Note = status.StateAuthMissing, "OpenCode rejected the API key (HTTP 401)"
-		return res
+		return fail(res, status.StateAuthMissing, "OpenCode rejected the API key (HTTP 401)")
 	case http.StatusForbidden:
-		res.State = status.StateUnsupported
-		res.Note = "OpenCode Go usage is unavailable for this API key (HTTP 403); a Go subscription may be required"
-		return res
+		return fail(res, status.StateUnsupported,
+			"OpenCode Go usage is unavailable for this API key (HTTP 403); a Go subscription may be required")
 	default:
-		res.State, res.Note = status.StateError, fmt.Sprintf("OpenCode usage endpoint returned HTTP %d", code)
-		return res
+		return fail(res, status.StateError, fmt.Sprintf("OpenCode usage endpoint returned HTTP %d", code))
 	}
 
 	var payload struct {
@@ -74,8 +71,7 @@ func (o OpenCode) Fetch(ctx context.Context) status.Provider {
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		res.State, res.Note = status.StateError, "could not parse OpenCode usage response"
-		return res
+		return fail(res, status.StateError, "could not parse OpenCode usage response")
 	}
 	var limited []string
 	for _, item := range []struct {
@@ -90,9 +86,7 @@ func (o OpenCode) Fetch(ctx context.Context) status.Provider {
 			continue
 		}
 		if !validPercent(*item.window.Percent, 100) {
-			res.State, res.Windows = status.StateError, nil
-			res.Note = "OpenCode " + item.label + " usage percent is outside 0..100"
-			return res
+			return fail(res, status.StateError, "OpenCode "+item.label+" usage percent is outside 0..100")
 		}
 		w := status.Window{Label: item.label, Percent: *item.window.Percent}
 		if item.window.ResetsAt != nil {
@@ -104,8 +98,7 @@ func (o OpenCode) Fetch(ctx context.Context) status.Provider {
 		}
 	}
 	if len(res.Windows) == 0 {
-		res.State, res.Note = status.StateError, "OpenCode usage response contained no quota windows"
-		return res
+		return fail(res, status.StateError, "OpenCode usage response contained no quota windows")
 	}
 	res.State, res.Plan = status.StateOK, "Go"
 	res.Note = "first-party endpoint; Go subscription usage only (Zen credit balance is not exposed)"
@@ -169,11 +162,14 @@ func SaveOpenCodeKey(key string) error {
 		return fmt.Errorf("create key file: %w", err)
 	}
 	defer os.Remove(f.Name())
-	if _, err := f.WriteString(key + "\n"); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("write key file: %w", err)
+	_, err = f.WriteString(key + "\n")
+	if err == nil {
+		err = f.Sync()
 	}
-	if err := f.Close(); err != nil {
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
 		return fmt.Errorf("write key file: %w", err)
 	}
 	if err := os.Rename(f.Name(), path); err != nil {
@@ -196,9 +192,6 @@ func opencodeKey() string {
 		return ""
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, 4096))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
+	line, _, _ := bufio.NewReaderSize(io.LimitReader(f, 4096), 4096).ReadLine()
+	return strings.TrimSpace(string(line))
 }
