@@ -7,7 +7,7 @@
 #
 # Environment:
 #   BIN_DIR              install directory (default ~/.local/bin)
-#   SUBSTATUS_VERSION    release tag to install, e.g. v0.1.0 (default: latest)
+#   SUBSTATUS_VERSION    release to install, e.g. v0.1.0 (default: latest)
 #   SUBSTATUS_NO_PROMPT  set to skip the OpenCode API key prompt
 #
 # The whole script is a function called on the last line, so a truncated
@@ -62,6 +62,10 @@ main() {
 	esac
 
 	version=${SUBSTATUS_VERSION:-}
+	case $version in
+	"" | v*) ;;
+	*) version=v$version ;; # release tags start with v
+	esac
 	if [ -z "$version" ]; then
 		# /releases/latest redirects to /releases/tag/<version>.
 		url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest") ||
@@ -97,11 +101,7 @@ main() {
 		# Replace atomically so a running substatus keeps working.
 		install -m 0755 "$tmp/substatus" "$bin.new"
 		mv -f "$bin.new" "$bin"
-		if [ -n "$installed" ]; then
-			echo "Updated substatus $installed -> $version at $bin"
-		else
-			echo "Installed substatus $version at $bin"
-		fi
+		echo "Installed substatus $version at $bin${installed:+ (was $installed)}"
 	fi
 
 	if [ -z "$installed" ]; then

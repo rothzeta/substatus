@@ -12,12 +12,22 @@ curl -fsSL https://raw.githubusercontent.com/rothzeta/substatus/main/install.sh 
 
 The script downloads the latest [release](https://github.com/rothzeta/substatus/releases)
 binary for Linux or macOS (amd64/arm64), verifies its SHA-256 checksum, and
-installs it to `$BIN_DIR` (default `~/.local/bin`). **To update, run the same
-command again**; it does nothing when you already have the latest version.
-`SUBSTATUS_VERSION=v0.1.0` pins a release. On first install it offers to save an
-OpenCode API key (`SUBSTATUS_NO_PROMPT=1` skips that) and prints a note if
-`$BIN_DIR` is not on your `PATH`. If a different `substatus` earlier on `PATH`
-shadows the installed one, the script warns.
+installs it. **To update, run the same command again**; it does nothing when you
+already have the latest version. On first install it offers to save an OpenCode
+API key, prints a note if the install directory is not on your `PATH`, and warns
+if a different `substatus` earlier on `PATH` shadows the installed one.
+
+Options are environment variables. Set them on `sh`, not on `curl`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/rothzeta/substatus/main/install.sh | BIN_DIR=/usr/local/bin sh
+```
+
+| Variable | Effect |
+|---|---|
+| `BIN_DIR` | install directory (default `~/.local/bin`) |
+| `SUBSTATUS_VERSION` | release to install instead of the latest, e.g. `v0.1.0` |
+| `SUBSTATUS_NO_PROMPT` | any value skips the OpenCode API key prompt |
 
 Linux and macOS are supported. Windows is not.
 
@@ -46,13 +56,19 @@ holds only the saved OpenCode key.
 ```text
 substatus [flags]
 
-  --refresh duration   automatic refresh interval, minimum 15s (default 5m0s)
-  --once               print one snapshot and exit
-  --no-color           disable ANSI color (also honors NO_COLOR)
-  --version            print version and exit
-  --set-opencode-key   read an OpenCode API key from stdin and save it
+  -no-color
+    	disable ANSI color (also honors NO_COLOR)
+  -once
+    	print one snapshot and exit (for scripting)
+  -refresh duration
+    	interval between automatic refreshes (minimum 15s) (default 5m0s)
+  -set-opencode-key
+    	read an OpenCode API key from stdin and save it
+  -version
+    	print version and exit
 ```
 
+Flags take one or two dashes (`--once` works too).
 Interactive keys: `r` refreshes, `q` or Ctrl-C quits. The UI redraws on resize.
 The interactive view needs a terminal; use `--once` in scripts. One refresh
 costs several CPU-seconds (mostly `claude -p`), hence the 5 minute default.

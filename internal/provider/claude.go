@@ -125,10 +125,10 @@ func parseClaudeReset(s string, now time.Time) time.Time {
 // resetSkew tolerates clock skew and output that is a little stale.
 const resetSkew = time.Hour
 
-// earliestAfter returns the first of the ascending candidates not before min.
-func earliestAfter(candidates []time.Time, min time.Time) time.Time {
+// earliestAfter returns the first of the ascending candidates not before notBefore.
+func earliestAfter(candidates []time.Time, notBefore time.Time) time.Time {
 	for _, c := range candidates {
-		if !c.Before(min) {
+		if !c.Before(notBefore) {
 			return c
 		}
 	}

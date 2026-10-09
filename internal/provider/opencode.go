@@ -134,9 +134,9 @@ func (o OpenCode) get(ctx context.Context, key string) ([]byte, int, error) {
 	return body, resp.StatusCode, err
 }
 
-// OpenCodeKeyPath is where SaveOpenCodeKey stores the key: substatus/opencode_api_key
+// opencodeKeyPath is where SaveOpenCodeKey stores the key: substatus/opencode_api_key
 // under the user config directory ($XDG_CONFIG_HOME or ~/.config on Linux).
-func OpenCodeKeyPath() (string, error) {
+func opencodeKeyPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("locate config directory: %w", err)
@@ -144,22 +144,23 @@ func OpenCodeKeyPath() (string, error) {
 	return filepath.Join(dir, "substatus", "opencode_api_key"), nil
 }
 
-// SaveOpenCodeKey atomically writes key to OpenCodeKeyPath with mode 0600.
-func SaveOpenCodeKey(key string) error {
+// SaveOpenCodeKey atomically writes key with mode 0600 and returns the file's
+// path.
+func SaveOpenCodeKey(key string) (string, error) {
 	key = strings.TrimSpace(key)
 	if key == "" || strings.ContainsAny(key, " \t\r\n") {
-		return errors.New("API key must be a single non-empty token")
+		return "", errors.New("API key must be a single non-empty token")
 	}
-	path, err := OpenCodeKeyPath()
+	path, err := opencodeKeyPath()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
+		return "", fmt.Errorf("create config directory: %w", err)
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".opencode_api_key-*") // mode 0600
 	if err != nil {
-		return fmt.Errorf("create key file: %w", err)
+		return "", fmt.Errorf("create key file: %w", err)
 	}
 	defer os.Remove(f.Name())
 	_, err = f.WriteString(key + "\n")
@@ -170,12 +171,12 @@ func SaveOpenCodeKey(key string) error {
 		err = cerr
 	}
 	if err != nil {
-		return fmt.Errorf("write key file: %w", err)
+		return "", fmt.Errorf("write key file: %w", err)
 	}
 	if err := os.Rename(f.Name(), path); err != nil {
-		return fmt.Errorf("replace key file: %w", err)
+		return "", fmt.Errorf("replace key file: %w", err)
 	}
-	return nil
+	return path, nil
 }
 
 // opencodeKey returns OPENCODE_API_KEY, or else the saved key, or "".
@@ -183,7 +184,7 @@ func opencodeKey() string {
 	if key := strings.TrimSpace(os.Getenv("OPENCODE_API_KEY")); key != "" {
 		return key
 	}
-	path, err := OpenCodeKeyPath()
+	path, err := opencodeKeyPath()
 	if err != nil {
 		return ""
 	}
