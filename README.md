@@ -4,30 +4,34 @@ A Go TUI for subscription/quota status across **Codex**, **Claude**,
 **Gemini (via `agy`)**, and **OpenCode**. It refreshes on a configurable interval
 and displays provider-reported used percentages and reset times.
 
-## Install
+## Install and update
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/rothzeta/substatus/main/install.sh | sh
 ```
 
-or, from a checkout, `./install.sh`. The script builds with Go 1.24+ (no cgo or
-external Go dependencies), or with Docker (`golang:1.24-bookworm`) when Go is not
-installed, and installs `substatus` into `$BIN_DIR` (default `~/.local/bin`). It
-then offers to save an OpenCode API key; set `SUBSTATUS_NO_PROMPT=1` to skip.
+The script downloads the latest [release](https://github.com/rothzeta/substatus/releases)
+binary for Linux or macOS (amd64/arm64), verifies its SHA-256 checksum, and
+installs it to `$BIN_DIR` (default `~/.local/bin`). **To update, run the same
+command again**; it does nothing when you already have the latest version.
+`SUBSTATUS_VERSION=v0.1.0` pins a release. On first install it offers to save an
+OpenCode API key (`SUBSTATUS_NO_PROMPT=1` skips that).
 
-To build by hand:
+To build from source instead (Go 1.24+, no cgo or external dependencies):
 
 ```sh
 go build -o substatus ./cmd/substatus
-./substatus --once --no-color
 ```
+
+Releases are built by GitHub Actions when a `v*` tag is pushed; the tag becomes
+the version that `substatus --version` prints.
 
 ## Usage
 
 ```text
 substatus [flags]
 
-  -refresh duration   automatic refresh interval (default 1m0s)
+  -refresh duration   automatic refresh interval, minimum 15s (default 5m0s)
   -once               print one snapshot and exit
   -no-color           disable ANSI color (also honors NO_COLOR)
   -version            print version and exit
@@ -35,6 +39,8 @@ substatus [flags]
 ```
 
 Interactive keys: `r` refreshes, `q` or Ctrl-C quits. The UI redraws on resize.
+The interactive view needs a terminal; use `--once` in scripts. One refresh
+costs several CPU-seconds (mostly `claude -p`), hence the 5 minute default.
 Every provider row appears immediately as loading and fills in as soon as that
 provider answers, so one slow CLI never holds up the others.
 
@@ -85,8 +91,9 @@ Research checked on **2026-10-08**:
   tokens. This boundary remains active: substatus runs the official `claude`
   binary, which authenticates itself. No OAuth credential file, keychain access,
   or private usage endpoint is used by substatus. The child process keeps only
-  Claude Code's own `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN`; other secrets
-  are scrubbed from its environment.
+  Claude Code's own `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+  `CLAUDE_CODE_OAUTH_TOKEN`; other common credential variables are scrubbed
+  from its environment (a best-effort denylist).
 - [Anthropic Consumer Terms](https://www.anthropic.com/legal/consumer-terms) and
   [Commercial Terms](https://www.anthropic.com/legal/commercial-terms) remain
   applicable to the user's Claude Code use. This app does not alter them or
@@ -105,7 +112,8 @@ that limitation and points to the official CLI/account interface.
 
 ## Privacy and bounds
 
-Provider commands have finite deadlines and output limits. CLI stderr, raw RPC
+Provider commands run in a private, empty temporary directory with finite
+deadlines and output limits, and are killed when substatus exits. CLI stderr, raw RPC
 errors, account identity, and provider credentials are not rendered. OpenCode's
 API key is excluded from child-process environments and is sent only to its
 requested first-party API route. There is no app telemetry. The only file substatus
@@ -113,28 +121,19 @@ writes is the OpenCode key, and only on `--set-opencode-key`.
 
 ## Verification
 
-Tests use synthetic CLI output and fake HTTP servers. They cover protocol ordering,
-quota parsing, missing/null values, disabled buckets, invalid percentages, reset
-handling and year inference, cancellation, rejection of Claude model turns, and progressive snapshot
-delivery.
-They do not prove live account access or a particular installed CLI's JSON shape.
+Tests use synthetic CLI output and fake HTTP servers. They cover protocol
+ordering, quota parsing, missing/null values, disabled buckets, invalid
+percentages, reset handling and year inference, cancellation, rejection of
+Claude model turns, progressive snapshot delivery and subprocess reaping, the
+CLI output cap and private working directory, environment scrubbing, and
+redirect refusal. They do not prove live account access or a particular
+installed CLI's output. CI runs the checks below on every push.
 
 ```sh
-gofmt -w cmd internal
-go test ./internal/provider ./internal/runner ./internal/ui ./cmd/substatus
+test -z "$(gofmt -l .)"
 go vet ./...
-go test ./...
 go test -race ./...
-go build -o substatus ./cmd/substatus
-./substatus --version
-```
-
-For a containerized check:
-
-```sh
-docker run --rm -v "$PWD:/src" -w /src -u "$(id -u):$(id -g)" \
-  -e HOME=/tmp -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod \
-  golang:1.24-bookworm sh -c 'test -z "$(gofmt -l cmd internal)" && go vet ./... && go test ./... && go build -o substatus ./cmd/substatus'
+shellcheck install.sh
 ```
 
 Live Gemini validation requires running `agy --print /usage --output-format json`
