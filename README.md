@@ -1,5 +1,9 @@
 # substatus
 
+[![CI](https://github.com/rothzeta/substatus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rothzeta/substatus/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/rothzeta/substatus)](https://github.com/rothzeta/substatus/releases/latest)
+[![License](https://img.shields.io/github/license/rothzeta/substatus)](LICENSE)
+
 A Go TUI for subscription/quota status across **Codex**, **Claude**,
 **Gemini (via `agy`)**, and **OpenCode**. It refreshes on a configurable interval
 and displays provider-reported used percentages and reset times.
